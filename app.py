@@ -1,0 +1,1662 @@
+"""
+Streamlit UI for Email Scraper - Brightdata API Integration
+"""
+
+import streamlit as st
+import csv
+import os
+import re
+import sys
+from io import StringIO
+from dotenv import load_dotenv
+
+# Force reload of email_scraper module to ensure latest code is loaded
+if 'email_scraper' in sys.modules:
+    import importlib
+    import email_scraper
+    importlib.reload(email_scraper)
+    from email_scraper import (
+        BrightdataClient,
+        SupabaseClient,
+        EmailScraperEngine,
+        logger
+    )
+else:
+    from email_scraper import (
+        BrightdataClient,
+        SupabaseClient,
+        EmailScraperEngine,
+        logger
+    )
+
+# Load environment variables
+load_dotenv()
+
+# Page Configuration
+st.set_page_config(
+    page_title="Email Scraper",
+    page_icon="📧",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS
+st.markdown("""
+    <style>
+    .main {
+        padding: 2rem;
+    }
+    .stTitle {
+        color: #1f77b4;
+    }
+    .success-box {
+        background-color: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    .info-box {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        border-radius: 5px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+
+def initialize_session_state():
+    """Initialize Streamlit session state"""
+    if 'queries_loaded' not in st.session_state:
+        st.session_state.queries_loaded = False
+        st.session_state.queries = []
+        st.session_state.processing_started = False
+        st.session_state.processing_complete = False
+        st.session_state.results = None
+        st.session_state.stage2_results = None
+
+
+def validate_environment():
+    """Validate that all required environment variables are set"""
+    required_vars = {
+        'BRIGHTDATA_URL': os.getenv('BRIGHTDATA_URL'),
+        'SUPABASE_URL': os.getenv('SUPABASE_URL'),
+        'SUPABASE_KEY': os.getenv('SUPABASE_KEY')
+    }
+    
+    missing = [key for key, value in required_vars.items() if not value]
+    
+    if missing:
+        return False, f"Missing environment variables: {', '.join(missing)}"
+    
+    return True, "All environment variables configured"
+
+
+def load_csv_queries(uploaded_file) -> list:
+    """
+    Load queries from uploaded CSV file
+    
+    Args:
+        uploaded_file: Streamlit uploaded file object
+        
+    Returns:
+        List of queries from the first column
+    """
+    try:
+        stringio = StringIO(uploaded_file.getvalue().decode("utf8"))
+        csv_reader = csv.reader(stringio)
+        
+        # Skip header
+        next(csv_reader)
+        
+        queries = []
+        for row in csv_reader:
+            if row and len(row) > 0:
+                query = row[0].strip()
+                if query:
+                    queries.append(query)
+        
+        return queries
+    except Exception as e:
+        st.error(f"Error reading CSV file: {str(e)}")
+        return []
+
+
+def filter_queries(uploaded_queries: list, existing_queries: list) -> dict:
+    """
+    Filter queries by comparing against existing database queries
+    
+    Args:
+        uploaded_queries: List of queries from CSV
+        existing_queries: List of existing queries from database (lowercase)
+        
+    Returns:
+        Dictionary with filtered results
+    """
+    # Remove duplicates from uploaded queries (case-insensitive)
+    unique_queries = []
+    seen = set()
+    for query in uploaded_queries:
+        query_lower = query.lower().strip()
+        if query_lower and query_lower not in seen:
+            unique_queries.append(query)
+            seen.add(query_lower)
+    
+    # Split into new vs existing
+    new_queries = []
+    existing_in_db = []
+    
+    for query in unique_queries:
+        query_lower = query.lower().strip()
+        if query_lower in existing_queries:
+            existing_in_db.append(query)
+        else:
+            new_queries.append(query)
+    
+    return {
+        'total_uploaded': len(uploaded_queries),
+        'duplicates_in_csv': len(uploaded_queries) - len(unique_queries),
+        'unique_in_csv': len(unique_queries),
+        'new_queries': new_queries,
+        'existing_in_db': existing_in_db,
+        'new_count': len(new_queries),
+        'existing_count': len(existing_in_db)
+    }
+
+
+def display_stage0_tab():
+    """Display Stage 0 tab for filtering queries"""
+    st.header("🔍 Stage 0: Filter Queries")
+    st.markdown("Remove duplicate and already processed queries from your CSV file.")
+    
+    st.divider()
+    
+    # Upload section
+    st.subheader("📄 Upload CSV File")
+    uploaded_file = st.file_uploader(
+        "Choose a CSV file to filter",
+        type="csv",
+        key="stage0_upload"
+    )
+    
+    if uploaded_file is not None:
+        # Load queries from CSV
+        uploaded_queries = load_csv_queries(uploaded_file)
+        
+        if not uploaded_queries:
+            st.error("❌ No queries found in CSV file. Please check your file format.")
+            return
+        
+        st.divider()
+        
+        # Initialize Supabase client
+        supabase_url = os.getenv('SUPABASE_URL') or ""
+        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        
+        if not supabase_url or not supabase_key:
+            st.error("❌ Database configuration missing. Please check .env file.")
+            return
+        
+        try:
+            supabase_client = SupabaseClient(supabase_url, supabase_key)
+            
+            with st.spinner("🔍 Checking queries against database..."):
+                # Get existing queries from database
+                existing_queries = supabase_client.get_all_existing_queries()
+                
+                # Filter queries
+                result = filter_queries(uploaded_queries, existing_queries)
+            
+            st.divider()
+            
+            # Display metrics
+            st.subheader("📊 Filter Results")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Total Uploaded",
+                    result['total_uploaded']
+                )
+            
+            with col2:
+                st.metric(
+                    "Duplicates in CSV",
+                    result['duplicates_in_csv'],
+                    delta="removed"
+                )
+            
+            with col3:
+                st.metric(
+                    "✅ New Queries",
+                    result['new_count'],
+                    delta="to process"
+                )
+            
+            with col4:
+                st.metric(
+                    "⚠️ Already Exists",
+                    result['existing_count'],
+                    delta="skipped"
+                )
+            
+            st.divider()
+            
+            # Display query lists
+            col_left, col_right = st.columns(2)
+            
+            with col_left:
+                st.subheader("✅ New Queries")
+                if result['new_queries']:
+                    with st.expander(f"View {len(result['new_queries'])} new queries", expanded=True):
+                        for idx, query in enumerate(result['new_queries'], 1):
+                            st.markdown(f"{idx}. {query}")
+                else:
+                    st.info("🚫 No new queries found.")
+            
+            with col_right:
+                st.subheader("⚠️ Already in Database")
+                if result['existing_in_db']:
+                    with st.expander(f"View {len(result['existing_in_db'])} existing queries", expanded=False):
+                        for idx, query in enumerate(result['existing_in_db'], 1):
+                            st.markdown(f"{idx}. {query}")
+                else:
+                    st.success("✅ No duplicates found!")
+            
+            st.divider()
+            
+            # Download section
+            st.subheader("📥 Download Filtered CSV")
+            
+            if result['new_queries']:
+                # Create CSV for download
+                csv_output = StringIO()
+                csv_writer = csv.writer(csv_output)
+                csv_writer.writerow(['Query'])
+                for query in result['new_queries']:
+                    csv_writer.writerow([query])
+                
+                csv_data = csv_output.getvalue()
+                
+                st.download_button(
+                    label=f"📥 Download Filtered CSV ({len(result['new_queries'])} queries)",
+                    data=csv_data,
+                    file_name=f"filtered_queries_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    type="primary"
+                )
+                
+                st.success("✅ Ready to download! Use this filtered CSV in Stage 1 for processing.")
+            else:
+                st.warning("⚠️ All queries already exist in database. No new queries to process.")
+                st.info("💡 Tip: Upload a different CSV file with new queries.")
+        
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.error("Cannot connect to database. Please check your configuration.")
+            logger.error(f"Stage 0 error: {e}")
+
+
+def display_header():
+    """Display application header"""
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.title("📧 Email Scraper")
+        st.markdown("*Powered by Bright Data & Supabase*")
+    
+    with col2:
+        st.info("v1.0", icon="ℹ️")
+
+
+def display_sidebar():
+    """Display sidebar with configuration"""
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # Bright Data API Key input
+        st.subheader("Bright Data API Key")
+        api_key = st.text_input(
+            "Enter API Key",
+            type="password",
+            help="Your Bright Data API key"
+        )
+        
+        st.divider()
+        
+        # Environment status
+        is_valid, message = validate_environment()
+        
+        if is_valid:
+            st.success(message, icon="✅")
+        else:
+            st.error(message, icon="❌")
+            st.markdown("""
+            ### Setup Required
+            Please configure your `.env` file with:
+            - `BRIGHTDATA_URL`
+            - `SUPABASE_URL`
+            - `SUPABASE_KEY`
+            """)
+            return False, 2, None
+        
+        st.divider()
+        
+        # Settings
+        st.subheader("Settings")
+        batch_size = st.slider(
+            "Batch Size",
+            min_value=1,
+            max_value=5,
+            value=2,
+            help="Number of queries per API request"
+        )
+        
+        request_delay = st.slider(
+            "Request Delay (seconds)",
+            min_value=0,
+            max_value=10,
+            value=2,
+            help="Delay between API requests"
+        )
+        
+        return True, batch_size, api_key
+
+
+def display_upload_section():
+    """Display CSV file upload section"""
+    st.header("📁 Upload CSV File")
+    
+    uploaded_file = st.file_uploader(
+        "Choose a CSV file",
+        type="csv"
+    )
+    
+    return uploaded_file
+
+
+def display_queries_preview(queries):
+    """Display preview of loaded queries"""
+    st.subheader("📋 Loaded Queries")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Queries", len(queries))
+    with col2:
+        st.metric("Batches (÷2)", (len(queries) + 1) // 2)
+    with col3:
+        st.metric("API Requests", (len(queries) + 1) // 2)
+    
+    # Show preview
+    with st.expander("👁️ Preview Queries", expanded=False):
+        preview_cols = st.columns([1, 4])
+        
+        with preview_cols[0]:
+            st.write("**#**")
+            for i in range(1, min(len(queries) + 1, 21)):
+                st.write(i)
+        
+        with preview_cols[1]:
+            st.write("**Query**")
+            for query in queries[:20]:
+                st.write(query)
+        
+        if len(queries) > 20:
+            st.info(f"... and {len(queries) - 20} more queries")
+
+
+def display_processing_section():
+    """Display processing controls and results"""
+    st.header("🚀 Processing")
+    
+    start_button = st.button(
+        "Process",
+        use_container_width=True,
+        type="primary",
+        key="stage1_process"
+    )
+    
+    return start_button
+
+
+def process_queries(queries):
+    """
+    Process queries using the scraper engine
+    
+    Args:
+        queries: List of search queries
+        
+    Returns:
+        Statistics dictionary from processing
+    """
+    try:
+        # Get API key from session state
+        api_key = st.session_state.get('api_key', '')
+        
+        if not api_key:
+            st.error("Please enter Bright Data API Key in the sidebar")
+            return None
+        
+        # Initialize clients
+        brightdata_url = os.getenv('BRIGHTDATA_URL') or ""
+        supabase_url = os.getenv('SUPABASE_URL') or ""
+        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        
+        brightdata_client = BrightdataClient(api_key, brightdata_url)
+        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        
+        # Create engine and process
+        engine = EmailScraperEngine(brightdata_client, supabase_client)
+        
+        # Create progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Process queries with batch size from session state
+        batch_size = st.session_state.get('batch_size', 2)
+        stats = engine.process_queries(queries, batch_size)
+        
+        progress_bar.progress(1.0)
+        status_text.text("Processing complete!")
+        
+        return stats
+        
+    except Exception as e:
+        st.error(f"Error during processing: {str(e)}")
+        return None
+
+
+def process_automated_pipeline(queries):
+    """
+    Automated pipeline: Stage 1 → Stage 2 → Stage 3
+    Process queries, retrieve data, and extract emails automatically
+    
+    Args:
+        queries: List of search queries
+        
+    Returns:
+        Dictionary with complete pipeline statistics
+    """
+    try:
+        # Get API key from session state
+        api_key = st.session_state.get('api_key', '')
+        
+        if not api_key:
+            st.error("Please enter Bright Data API Key in the sidebar")
+            return None
+        
+        # Initialize clients
+        brightdata_url = os.getenv('BRIGHTDATA_URL') or ""
+        supabase_url = os.getenv('SUPABASE_URL') or ""
+        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        
+        brightdata_client = BrightdataClient(api_key, brightdata_url)
+        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        
+        # ============================================
+        # STAGE 1: Upload & Process Queries
+        # ============================================
+        st.info("🚀 **STAGE 1: Uploading queries to Brightdata...**")
+        stage1_status = st.empty()
+        stage1_progress = st.progress(0)
+        
+        engine = EmailScraperEngine(brightdata_client, supabase_client)
+        batch_size = st.session_state.get('batch_size', 2)
+        
+        stage1_status.info(f"📤 Uploading {len(queries)} queries in batches of {batch_size}...")
+        stats_stage1 = engine.process_queries(queries, batch_size)
+        
+        stage1_progress.progress(1.0)
+        
+        if not stats_stage1 or stats_stage1['successful_snapshots'] == 0:
+            st.error("❌ Stage 1 failed: No snapshots created")
+            return None
+        
+        stage1_status.success(f"✅ Stage 1 Complete: {stats_stage1['successful_snapshots']} snapshots created")
+        
+        # ============================================
+        # POLLING: Wait for Brightdata to process
+        # ============================================
+        st.info("⏳ **POLLING: Waiting for Brightdata to process data...**")
+        polling_status = st.empty()
+        polling_progress = st.empty()
+        
+        MAX_POLL_ATTEMPTS = 20  # 20 attempts × 30 sec = 10 minutes max
+        POLL_INTERVAL = 30  # 30 seconds
+        poll_attempt = 0
+        
+        polling_status.info(f"⏱️ Polling every {POLL_INTERVAL} seconds (max {MAX_POLL_ATTEMPTS} attempts)...")
+        
+        while poll_attempt < MAX_POLL_ATTEMPTS:
+            poll_attempt += 1
+            polling_progress.progress(poll_attempt / MAX_POLL_ATTEMPTS)
+            
+            # Check if any snapshots are ready
+            unprocessed = supabase_client.get_unprocessed_snapshots()
+            
+            if unprocessed:
+                # Try to retrieve at least one snapshot to check if ready
+                test_snapshot = unprocessed[0]['snapshot_id']
+                data, is_running, is_valid, error_reason = brightdata_client.get_snapshot_data(test_snapshot)
+                
+                if is_valid:
+                    polling_status.success(f"✅ Data ready after {poll_attempt} attempts ({poll_attempt * POLL_INTERVAL} seconds)")
+                    break
+                else:
+                    polling_status.info(f"⏳ Attempt {poll_attempt}/{MAX_POLL_ATTEMPTS}: Data not ready yet ({error_reason})...")
+            
+            if poll_attempt < MAX_POLL_ATTEMPTS:
+                import time
+                time.sleep(POLL_INTERVAL)
+        
+        if poll_attempt >= MAX_POLL_ATTEMPTS:
+            st.warning(f"⚠️ Polling timeout after {MAX_POLL_ATTEMPTS * POLL_INTERVAL} seconds. Proceeding with available data...")
+        
+        # ============================================
+        # STAGE 2: Retrieve Data
+        # ============================================
+        st.info("🚀 **STAGE 2: Retrieving data from Brightdata...**")
+        stage2_status = st.empty()
+        stage2_progress = st.progress(0)
+        stage2_log = st.empty()
+        
+        # Get unprocessed snapshots
+        snapshots = supabase_client.get_unprocessed_snapshots()
+        total_snapshots = len(snapshots)
+        
+        if total_snapshots == 0:
+            stage2_status.warning("⚠️ No unprocessed snapshots found")
+            stats_stage2 = {'total': 0, 'successful': 0, 'failed': 0, 'skipped': 0}
+        else:
+            stage2_status.info(f"📥 Processing {total_snapshots} snapshots...")
+            
+            # Initialize counters
+            successful = 0
+            failed = 0
+            skipped = 0
+            invalid_responses = 0
+            
+            for idx, snapshot_data in enumerate(snapshots):
+                snapshot_id = snapshot_data.get('snapshot_id')
+                queries_list = snapshot_data.get('query', [])
+                
+                # Update progress
+                progress = (idx + 1) / total_snapshots
+                stage2_progress.progress(progress)
+                stage2_status.info(f"📥 Processing snapshot {idx + 1}/{total_snapshots}: {snapshot_id}")
+                
+                try:
+                    # Retrieve snapshot data
+                    data, is_running, is_valid, error_reason = brightdata_client.get_snapshot_data(snapshot_id)
+                    
+                    if not is_valid:
+                        invalid_responses += 1
+                        stage2_log.warning(f"⚠️ [{idx+1}/{total_snapshots}] Invalid response: {snapshot_id} - {error_reason}")
+                        continue  # Skip invalid, will retry later
+                    
+                    if data:
+                        # Save to response_table
+                        save_success, error_type = supabase_client.save_response(snapshot_id, data)
+                        
+                        if save_success:
+                            # Mark as processed
+                            supabase_client.mark_as_processed(snapshot_id)
+                            successful += 1
+                            stage2_log.success(f"✅ [{idx+1}/{total_snapshots}] Saved: {snapshot_id}")
+                        elif error_type == 'duplicate':
+                            # Already exists, mark as processed
+                            supabase_client.mark_as_processed(snapshot_id)
+                            skipped += 1
+                            stage2_log.info(f"ℹ️ [{idx+1}/{total_snapshots}] Duplicate: {snapshot_id}")
+                        else:
+                            failed += 1
+                            stage2_log.error(f"❌ [{idx+1}/{total_snapshots}] Failed: {snapshot_id}")
+                    else:
+                        skipped += 1
+                        stage2_log.warning(f"⚠️ [{idx+1}/{total_snapshots}] No data: {snapshot_id}")
+                
+                except Exception as e:
+                    failed += 1
+                    stage2_log.error(f"❌ [{idx+1}/{total_snapshots}] Error: {snapshot_id} - {str(e)}")
+                
+                # Small delay
+                import time
+                time.sleep(0.5)
+            
+            stats_stage2 = {
+                'total': total_snapshots,
+                'successful': successful,
+                'failed': failed,
+                'skipped': skipped,
+                'invalid_responses': invalid_responses
+            }
+            
+            stage2_progress.progress(1.0)
+            stage2_status.success(f"✅ Stage 2 Complete: {successful}/{total_snapshots} snapshots retrieved")
+        
+        # ============================================
+        # STAGE 3: Extract Emails
+        # ============================================
+        st.info("🚀 **STAGE 3: Extracting emails from responses...**")
+        stage3_status = st.empty()
+        stage3_progress = st.progress(0)
+        stage3_log = st.empty()
+        
+        # Get unextracted responses
+        eligible_count = supabase_client.count_unextracted_responses()
+        
+        if eligible_count == 0:
+            stage3_status.warning("⚠️ No unextracted responses found")
+            stats_stage3 = {'total': 0, 'successful': 0, 'failed': 0, 'total_emails': 0}
+        else:
+            stage3_status.info(f"📧 Processing {eligible_count} responses in batches...")
+            
+            BATCH_SIZE = 20
+            num_batches = (eligible_count + BATCH_SIZE - 1) // BATCH_SIZE
+            
+            # Initialize counters
+            total_processed = 0
+            total_successful = 0
+            total_failed = 0
+            total_emails_extracted = 0
+            total_duplicate_emails = 0
+            
+            for batch_num in range(num_batches):
+                stage3_status.info(f"📦 Processing Batch {batch_num + 1}/{num_batches}")
+                
+                # Fetch current batch
+                rows = supabase_client.get_unextracted_responses(limit=BATCH_SIZE, offset=0)
+                
+                if not rows:
+                    break
+                
+                batch_total = len(rows)
+                
+                for idx, row in enumerate(rows):
+                    snapshot_id = row.get('snapshot_id')
+                    response_data = row.get('response')
+                    
+                    # Update progress
+                    overall_progress = (total_processed + idx + 1) / eligible_count
+                    stage3_progress.progress(min(overall_progress, 1.0))
+                    
+                    if not snapshot_id or not response_data:
+                        total_failed += 1
+                        continue
+                    
+                    # Extract emails
+                    emails = extract_emails_from_json(response_data)
+                    
+                    if emails:
+                        for email in emails:
+                            success, error_type = supabase_client.save_email(email)
+                            if success:
+                                total_emails_extracted += 1
+                                stage3_log.success(f"✅ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: {email}")
+                            elif error_type == 'duplicate':
+                                total_duplicate_emails += 1
+                                stage3_log.info(f"ℹ️ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: Duplicate {email}")
+                    
+                    # Mark as extracted
+                    if supabase_client.mark_email_extracted(snapshot_id):
+                        total_successful += 1
+                    else:
+                        total_failed += 1
+                
+                total_processed += batch_total
+            
+            stats_stage3 = {
+                'total': total_processed,
+                'successful': total_successful,
+                'failed': total_failed,
+                'total_emails': total_emails_extracted,
+                'duplicate_emails': total_duplicate_emails
+            }
+            
+            stage3_progress.progress(1.0)
+            stage3_status.success(f"✅ Stage 3 Complete: {total_emails_extracted} emails extracted")
+        
+        # ============================================
+        # FINAL SUMMARY
+        # ============================================
+        st.divider()
+        st.success("🎉 **AUTOMATED PIPELINE COMPLETE!**")
+        
+        summary_col1, summary_col2, summary_col3 = st.columns(3)
+        
+        with summary_col1:
+            st.metric("📤 Stage 1: Snapshots", stats_stage1['successful_snapshots'])
+        
+        with summary_col2:
+            st.metric("📥 Stage 2: Responses", stats_stage2['successful'])
+        
+        with summary_col3:
+            st.metric("📧 Stage 3: Emails", stats_stage3['total_emails'])
+        
+        st.info("💡 **Next Step:** Go to Stage 4 to view all extracted emails!")
+        
+        return {
+            'stage1': stats_stage1,
+            'stage2': stats_stage2,
+            'stage3': stats_stage3,
+            'total_emails': stats_stage3['total_emails']
+        }
+        
+    except Exception as e:
+        st.error(f"❌ Pipeline error: {str(e)}")
+        logger.error(f"Automated pipeline error: {e}")
+        return None
+
+
+def display_results(stats):
+    """Display processing results"""
+    st.header("✅ Results")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Total Queries",
+            stats['total_queries'],
+            delta=None
+        )
+    
+    with col2:
+        st.metric(
+            "Successful",
+            stats['successful_snapshots'],
+            delta=f"{(stats['successful_snapshots']/stats['total_batches']*100):.0f}%"
+        )
+    
+    with col3:
+        st.metric(
+            "Failed",
+            stats['failed_batches'],
+            delta=f"{(stats['failed_batches']/stats['total_batches']*100):.0f}%"
+        )
+    
+    with col4:
+        st.metric(
+            "Batches",
+            stats['total_batches'],
+            delta="2 per batch"
+        )
+    
+    # Status indicator
+    if stats['failed_batches'] == 0:
+        st.success("Processing complete")
+    elif stats['successful_snapshots'] > 0:
+        st.warning(f"{stats['failed_batches']} batches failed")
+    else:
+        st.error("Processing failed")
+    
+    # Display snapshot-query mapping
+    if stats.get('snapshot_query_map'):
+        st.divider()
+        st.subheader("📋 Snapshot → Query Mapping")
+        
+        with st.expander("👁️ View Snapshot Details", expanded=True):
+            for snapshot_id, queries in stats['snapshot_query_map'].items():
+                st.markdown(f"**Snapshot ID:** `{snapshot_id}`")
+                st.markdown(f"**Queries ({len(queries)}):**")
+                for idx, query in enumerate(queries, 1):
+                    st.markdown(f"  {idx}. {query}")
+                st.divider()
+
+
+def process_unprocessed_snapshots():
+    """
+    Process all unprocessed snapshots from Supabase
+    
+    Returns:
+        Dictionary with statistics about processed snapshots
+    """
+    try:
+        # Get API key from session state
+        api_key = st.session_state.get('api_key', '')
+        
+        if not api_key:
+            st.error("Please enter Bright Data API Key in the sidebar")
+            return {
+                'total': 0,
+                'successful': 0,
+                'failed': 0,
+                'skipped': 0,
+                'db_errors': 0,
+                'duplicate_snapshots': 0,
+                'invalid_responses': 0,
+                'message': 'API key not provided'
+            }
+        
+        # Initialize clients
+        brightdata_url = os.getenv('BRIGHTDATA_URL') or ""
+        supabase_url = os.getenv('SUPABASE_URL') or ""
+        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        
+        brightdata_client = BrightdataClient(api_key, brightdata_url)
+        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        
+        # Get unprocessed snapshots (now returns list of dicts with snapshot_id and query)
+        snapshots = supabase_client.get_unprocessed_snapshots()
+        
+        if not snapshots:
+            return {
+                'total': 0,
+                'successful': 0,
+                'failed': 0,
+                'skipped': 0,
+                'invalid_responses': 0,
+                'message': 'No unprocessed snapshots found'
+            }
+        
+        # Initialize counters
+        total = len(snapshots)
+        successful = 0
+        failed = 0
+        skipped = 0
+        db_errors = 0
+        duplicate_snapshots = 0
+        running_snapshots = 0
+        invalid_responses = 0
+        
+        # Process each snapshot with progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        query_text = st.empty()
+        error_text = st.empty()
+        
+        for idx, snapshot_data in enumerate(snapshots):
+            snapshot_id = snapshot_data.get('snapshot_id')
+            queries = snapshot_data.get('query', [])
+            
+            # Update progress
+            progress = (idx + 1) / total
+            progress_bar.progress(progress)
+            status_text.text(f"Processing {idx + 1}/{total}: {snapshot_id}")
+            
+            # Display queries associated with this snapshot
+            if queries:
+                query_text.info(f"📝 Queries: {' | '.join(queries)}")
+            
+            try:
+                # Retrieve snapshot data with validation
+                result = brightdata_client.get_snapshot_data(snapshot_id)
+                
+                # Handle tuple unpacking - new version returns 4 values
+                if len(result) == 4:
+                    data, is_running, is_valid, error_reason = result
+                else:
+                    # Fallback for old version (shouldn't happen after restart)
+                    data, is_running = result
+                    is_valid = not is_running and data is not None
+                    error_reason = "Legacy response format"
+                
+                # Check if response is invalid (status running or error with size < 2000)
+                if not is_valid:
+                    # Don't save to response_table, keep processed = false
+                    invalid_responses += 1
+                    if is_running:
+                        running_snapshots += 1
+                    logger.warning(f"Snapshot {snapshot_id} is invalid: {error_reason} - skipping (will remain unprocessed)")
+                    error_text.warning(f"⚠️ Invalid response for {snapshot_id}: {error_reason}")
+                    continue  # Skip to next snapshot
+                    
+            except Exception as e:
+                # Handle any errors during retrieval
+                failed += 1
+                error_msg = f"Error retrieving {snapshot_id}: {str(e)}"
+                logger.error(error_msg)
+                error_text.error(f"❌ {error_msg}")
+                continue  # Skip to next snapshot
+            
+            # Process valid data
+            if data:
+                # Save response to Supabase response_table
+                save_success, error_type = supabase_client.save_response(snapshot_id, data)
+                if save_success:
+                    # Mark as processed in snapshot_table
+                    if supabase_client.mark_as_processed(snapshot_id):
+                        successful += 1
+                        logger.info(f"Successfully processed snapshot {snapshot_id}")
+                    else:
+                        failed += 1
+                        db_errors += 1
+                        error_msg = f"Database error: Failed to mark {snapshot_id} as processed"
+                        logger.error(error_msg)
+                        error_text.error(error_msg)
+                elif error_type == 'duplicate':
+                    duplicate_snapshots += 1
+                    # Still mark as processed since response already exists
+                    supabase_client.mark_as_processed(snapshot_id)
+                else:
+                    failed += 1
+                    db_errors += 1
+                    error_msg = f"Database error: Failed to save response for {snapshot_id}"
+                    logger.error(error_msg)
+                    error_text.error(error_msg)
+            else:
+                # Skip this snapshot
+                skipped += 1
+                logger.warning(f"Skipped snapshot {snapshot_id} - no data received")
+            
+            # Add small delay
+            import time
+            time.sleep(0.5)
+        
+        progress_bar.progress(1.0)
+        status_text.text("Processing complete!")
+        
+        return {
+            'total': total,
+            'successful': successful,
+            'failed': failed,
+            'skipped': skipped,
+            'db_errors': db_errors,
+            'duplicate_snapshots': duplicate_snapshots,
+            'running_snapshots': running_snapshots,
+            'invalid_responses': invalid_responses,
+            'message': f'Processed {successful}/{total} snapshots successfully'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in process_unprocessed_snapshots: {e}")
+        st.error(f"Critical error: {str(e)}")
+        return {
+            'total': 0,
+            'successful': 0,
+            'failed': 0,
+            'skipped': 0,
+            'db_errors': 0,
+            'duplicate_snapshots': 0,
+            'running_snapshots': 0,
+            'invalid_responses': 0,
+            'message': f'Error: {str(e)}'
+        }
+
+
+def display_stage2_tab():
+    """Display Stage 2 tab for retrieving snapshot data"""
+    st.header("📥 Stage 2: Retrieve Snapshot Data")
+    
+    # Initialize clients to get count
+    supabase_url = os.getenv('SUPABASE_URL') or ""
+    supabase_key = os.getenv('SUPABASE_KEY') or ""
+    supabase_client = SupabaseClient(supabase_url, supabase_key)
+    
+    # Get unprocessed snapshots (returns list of dicts with snapshot_id and query)
+    snapshots = supabase_client.get_unprocessed_snapshots()
+    eligible_count = len(snapshots)
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.metric("Eligible Snapshots", eligible_count)
+    with col2:
+        total_queries = sum(len(s.get('query', [])) for s in snapshots)
+        st.metric("Total Queries", total_queries)
+    
+    # Preview snapshots with queries
+    if snapshots:
+        with st.expander("👁️ Preview Unprocessed Snapshots", expanded=False):
+            for snapshot in snapshots[:5]:  # Show first 5
+                st.markdown(f"**Snapshot:** `{snapshot.get('snapshot_id', 'N/A')}`")
+                queries = snapshot.get('query', [])
+                if queries:
+                    st.markdown(f"**Queries ({len(queries)}):** {' | '.join(queries)}")
+                else:
+                    st.markdown("**Queries:** None")
+                st.divider()
+            if len(snapshots) > 5:
+                st.info(f"... and {len(snapshots) - 5} more snapshots")
+    
+    st.divider()
+    
+    retrieve_button = st.button(
+        "Process",
+        use_container_width=True,
+        type="primary",
+        key="stage2_process"
+    )
+    
+    # Process all unprocessed snapshots when button is clicked
+    if retrieve_button:
+        if eligible_count == 0:
+            st.info("No unprocessed snapshots found")
+        else:
+            with st.spinner("Processing..."):
+                result = process_unprocessed_snapshots()
+            
+            st.divider()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total", result['total'])
+            
+            with col2:
+                st.metric("Successful", result['successful'])
+            
+            with col3:
+                st.metric("Skipped", result['skipped'])
+            
+            with col4:
+                st.metric("Failed", result['failed'])
+            
+            # Show duplicate info if any
+            if result.get('duplicate_snapshots', 0) > 0:
+                st.info(f"ℹ️ {result['duplicate_snapshots']} duplicate snapshots skipped (already exist in database)")
+            
+            # Show invalid responses info if any
+            if result.get('invalid_responses', 0) > 0:
+                st.warning(f"⚠️ {result['invalid_responses']} invalid responses (status running or error with size < 2000 bytes) - will remain unprocessed for retry")
+            
+            # Show database errors if any
+            if result.get('db_errors', 0) > 0:
+                st.error(f"⚠️ {result['db_errors']} database errors occurred")
+            
+            if result['successful'] == result['total']:
+                st.success("Processing complete")
+            elif result['successful'] > 0:
+                st.warning(f"{result['skipped']} skipped, {result['failed']} failed")
+            else:
+                st.error("Processing failed")
+
+
+def extract_emails_from_text(text: str) -> list:
+    """
+    Extract email addresses from text using regex
+    
+    Args:
+        text: Text content to extract emails from
+        
+    Returns:
+        List of unique email addresses
+    """
+    # Email regex pattern
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    
+    # Find all emails
+    emails = re.findall(email_pattern, text)
+    
+    # Return unique emails
+    return list(set(emails))
+
+
+def extract_emails_from_json(json_data):
+    """
+    Extract email addresses from JSON data using regex
+    
+    Args:
+        json_data: JSON data (dict, list, or any JSON structure)
+        
+    Returns:
+        List of unique email addresses
+    """
+    import json
+    
+    # Convert JSON to string to search through it
+    json_string = json.dumps(json_data)
+    
+    # Extract emails from the JSON string
+    return extract_emails_from_text(json_string)
+
+
+def process_all_responses_for_emails(total_count: int):
+    """
+    Process all unextracted responses sequentially in batches
+    
+    Args:
+        total_count: Total number of eligible rows to process
+        
+    Returns:
+        Dictionary with extraction statistics
+    """
+    try:
+        # Initialize Supabase client
+        supabase_url = os.getenv('SUPABASE_URL') or ""
+        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        
+        BATCH_SIZE = 20
+        num_batches = (total_count + BATCH_SIZE - 1) // BATCH_SIZE
+        
+        # Initialize overall counters
+        total_processed = 0
+        total_successful = 0
+        total_failed = 0
+        total_emails_extracted = 0
+        total_db_errors = 0
+        total_duplicate_emails = 0
+        
+        # Create progress containers
+        overall_progress_bar = st.progress(0)
+        batch_status = st.empty()
+        current_batch_progress = st.empty()
+        email_log = st.empty()
+        
+        # Process in batches
+        for batch_num in range(num_batches):
+            batch_status.info(f"📦 Processing Batch {batch_num + 1}/{num_batches}")
+            
+            # Fetch current batch (always from offset 0 since we mark as extracted)
+            rows = supabase_client.get_unextracted_responses(limit=BATCH_SIZE, offset=0)
+            
+            if not rows:
+                batch_status.warning(f"Batch {batch_num + 1}: No more rows to process")
+                break
+            
+            # Process each row in current batch
+            batch_total = len(rows)
+            batch_emails = 0
+            batch_duplicates = 0
+            batch_errors = 0
+            
+            for idx, row in enumerate(rows):
+                snapshot_id = row.get('snapshot_id')
+                response_data = row.get('response')
+                
+                if not snapshot_id or not response_data:
+                    total_failed += 1
+                    batch_errors += 1
+                    continue
+                
+                # Extract emails from response
+                emails = extract_emails_from_json(response_data)
+                
+                if emails:
+                    # Save each email
+                    for email in emails:
+                        success, error_type = supabase_client.save_email(email)
+                        if success:
+                            batch_emails += 1
+                            email_log.success(f"✅ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: Saved {email}")
+                        elif error_type == 'duplicate':
+                            batch_duplicates += 1
+                            email_log.info(f"ℹ️ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: Duplicate {email}")
+                        else:
+                            batch_errors += 1
+                            email_log.error(f"❌ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: Failed {email}")
+                
+                # Mark as extracted
+                if supabase_client.mark_email_extracted(snapshot_id):
+                    total_successful += 1
+                else:
+                    total_failed += 1
+                    batch_errors += 1
+                
+                total_processed += 1
+            
+            # Update overall progress
+            overall_progress = min(total_processed / total_count, 1.0)
+            overall_progress_bar.progress(overall_progress)
+            current_batch_progress.text(f"Batch {batch_num + 1} Complete: {batch_emails} emails saved, {batch_duplicates} duplicates, {batch_errors} errors")
+            
+            # Update totals
+            total_emails_extracted += batch_emails
+            total_duplicate_emails += batch_duplicates
+            total_db_errors += batch_errors
+        
+        # Clear progress displays
+        overall_progress_bar.progress(1.0)
+        batch_status.success(f"✅ All {num_batches} batches processed!")
+        
+        return {
+            'total': total_processed,
+            'successful': total_successful,
+            'failed': total_failed,
+            'total_emails': total_emails_extracted,
+            'duplicate_emails': total_duplicate_emails,
+            'db_errors': total_db_errors,
+            'message': f'Processed {total_successful}/{total_processed} responses successfully'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in process_all_responses_for_emails: {e}")
+        st.error(f"Critical error: {str(e)}")
+        return {
+            'total': 0,
+            'successful': 0,
+            'failed': 0,
+            'total_emails': 0,
+            'duplicate_emails': 0,
+            'db_errors': 0,
+            'message': f'Error: {str(e)}'
+        }
+
+
+def process_responses_for_emails(batch_size: int = 20):
+    """
+    Process unextracted responses from Supabase and extract emails
+    DEPRECATED: Use process_all_responses_for_emails instead
+    
+    Args:
+        batch_size: Total number of rows to process (fetched in sub-batches of 20)
+        
+    Returns:
+        Dictionary with extraction statistics
+    """
+    try:
+        # Initialize Supabase client
+        supabase_url = os.getenv('SUPABASE_URL') or ""
+        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        
+        # Fetch in sub-batches of 20 to avoid timeout
+        SUB_BATCH_SIZE = 20
+        all_rows = []
+        
+        for offset in range(0, batch_size, SUB_BATCH_SIZE):
+            current_limit = min(SUB_BATCH_SIZE, batch_size - offset)
+            rows_batch = supabase_client.get_unextracted_responses(limit=current_limit, offset=offset)
+            all_rows.extend(rows_batch)
+            if len(rows_batch) < current_limit:
+                # No more rows available
+                break
+        
+        rows = all_rows
+        
+        if not rows:
+            return {
+                'total': 0,
+                'successful': 0,
+                'failed': 0,
+                'total_emails': 0,
+                'message': 'No unextracted responses found'
+            }
+        
+        # Initialize counters
+        total = len(rows)
+        successful = 0
+        failed = 0
+        total_emails_extracted = 0
+        db_errors = 0
+        duplicate_emails = 0
+        
+        # Process each response with progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        email_log = st.empty()
+        
+        for idx, row in enumerate(rows):
+            # Update progress
+            progress = (idx + 1) / total
+            progress_bar.progress(progress)
+            status_text.text(f"Processing {idx + 1}/{total}: Snapshot {row['snapshot_id']}")
+            
+            # Extract emails from response JSON
+            response_data = row.get('response', {})
+            emails = extract_emails_from_json(response_data)
+            
+            email_save_failed = False
+            if emails:
+                # Save each email individually
+                for email in emails:
+                    success, error_type = supabase_client.save_email(email)
+                    if success:
+                        total_emails_extracted += 1
+                        email_log.success(f"✅ Saved: {email}")
+                    elif error_type == 'duplicate':
+                        duplicate_emails += 1
+                        email_log.info(f"ℹ️ Duplicate: {email} (already exists)")
+                    else:
+                        email_save_failed = True
+                        db_errors += 1
+                        email_log.error(f"❌ Failed: {email} (database error)")
+                        logger.error(f"Database error: Failed to save email {email}")
+                logger.info(f"Extracted {len(emails)} emails from snapshot {row['snapshot_id']}")
+            
+            # Mark as extracted regardless of whether emails were found
+            if supabase_client.mark_email_extracted(row['snapshot_id']):
+                successful += 1
+            else:
+                failed += 1
+                db_errors += 1
+                error_msg = f"Database error: Failed to mark {row['snapshot_id']} as extracted"
+                logger.error(error_msg)
+                email_log.error(f"❌ {error_msg}")
+        
+        progress_bar.progress(1.0)
+        status_text.text("Processing complete!")
+        
+        return {
+            'total': total,
+            'successful': successful,
+            'failed': failed,
+            'total_emails': total_emails_extracted,
+            'db_errors': db_errors,
+            'duplicate_emails': duplicate_emails,
+            'message': f'Processed {successful}/{total} responses, extracted {total_emails_extracted} emails'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error processing responses for emails: {e}")
+        st.error(f"Critical error: {str(e)}")
+        return {
+            'total': 0,
+            'successful': 0,
+            'failed': 0,
+            'total_emails': 0,
+            'db_errors': 0,
+            'duplicate_emails': 0,
+            'message': f'Error: {str(e)}'
+        }
+
+
+def display_stage3_tab():
+    """Display Stage 3 tab for extracting emails from response_table"""
+    st.header("📧 Stage 3: Extract Emails")
+    
+    # Initialize clients to get count
+    supabase_url = os.getenv('SUPABASE_URL') or ""
+    supabase_key = os.getenv('SUPABASE_KEY') or ""
+    supabase_client = SupabaseClient(supabase_url, supabase_key)
+    
+    # Get unextracted count
+    eligible_count = supabase_client.count_unextracted_responses()
+    
+    # Calculate number of batches
+    BATCH_SIZE = 20
+    num_batches = (eligible_count + BATCH_SIZE - 1) // BATCH_SIZE if eligible_count > 0 else 0
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.metric("Total Eligible Rows", eligible_count)
+    
+    with col2:
+        st.metric("Batches (20 rows each)", num_batches)
+    
+    st.divider()
+    
+    process_button = st.button(
+        "Process All",
+        use_container_width=True,
+        type="primary",
+        key="stage3_process",
+        help=f"Process all {eligible_count} rows in {num_batches} sequential batches"
+    )
+    
+    # Process when button clicked
+    if process_button:
+        if eligible_count == 0:
+            st.info("No unextracted responses found")
+        else:
+            result = process_all_responses_for_emails(eligible_count)
+            
+            st.divider()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total", result['total'])
+            
+            with col2:
+                st.metric("Processed", result['successful'])
+            
+            with col3:
+                st.metric("Failed", result['failed'])
+            
+            with col4:
+                st.metric("Emails", result['total_emails'])
+            
+            # Show duplicate info if any
+            if result.get('duplicate_emails', 0) > 0:
+                st.info(f"ℹ️ {result['duplicate_emails']} duplicate emails skipped (already exist in database)")
+            
+            # Show database errors if any
+            if result.get('db_errors', 0) > 0:
+                st.error(f"⚠️ {result['db_errors']} database errors occurred")
+            
+            if result['successful'] == result['total']:
+                st.success("Processing complete")
+            elif result['successful'] > 0:
+                st.warning(f"{result['failed']} failed")
+            else:
+                st.error("Processing failed")
+
+
+def display_stage4_tab():
+    """Display Stage 4 tab for viewing emails by date"""
+    st.header("📊 Stage 4: View Emails")
+    
+    # Date filter inputs
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        start_date = st.date_input("Start Date", value=None)
+    
+    with col2:
+        end_date = st.date_input("End Date", value=None)
+    
+    st.divider()
+    
+    fetch_button = st.button(
+        "Fetch Emails",
+        use_container_width=True,
+        type="primary",
+        key="stage4_fetch"
+    )
+    
+    if fetch_button:
+        # Initialize Supabase client
+        supabase_url = os.getenv('SUPABASE_URL') or ""
+        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        
+        # Convert dates to string format if provided
+        start_date_str = None
+        end_date_str = None
+        
+        if start_date:
+            # Handle both single date and tuple
+            if isinstance(start_date, tuple):
+                start_date_str = start_date[0].strftime('%Y-%m-%d') if start_date[0] else None
+            else:
+                start_date_str = start_date.strftime('%Y-%m-%d')
+        
+        if end_date:
+            # Handle both single date and tuple
+            if isinstance(end_date, tuple):
+                end_date_str = end_date[0].strftime('%Y-%m-%d') if end_date[0] else None
+            else:
+                end_date_str = end_date.strftime('%Y-%m-%d')
+        
+        with st.spinner("Fetching emails..."):
+            emails = supabase_client.get_emails_by_date(start_date_str, end_date_str)
+        
+        st.divider()
+        
+        if emails:
+            st.metric("Total Emails", len(emails))
+            
+            st.divider()
+            
+            # Display emails in a table
+            st.subheader("📮 Email List")
+            
+            # Create DataFrame for better display
+            import pandas as pd
+            df = pd.DataFrame(emails)
+            
+            # Display only email column if exists, otherwise show all
+            if 'email' in df.columns:
+                if 'created_at' in df.columns:
+                    df_display = df[['email', 'created_at']]
+                    df_display['created_at'] = pd.to_datetime(df_display['created_at']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    df_display = df[['email']]
+                
+                st.dataframe(df_display, use_container_width=True, height=400)
+                
+                # Download button
+                st.divider()
+                csv = df_display.to_csv(index=False)
+                st.download_button(
+                    label="💾 Download as CSV",
+                    data=csv,
+                    file_name=f"emails_{start_date_str or 'all'}_{end_date_str or 'all'}.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No emails found for the selected date range")
+
+
+def main():
+    """Main Streamlit application"""
+    initialize_session_state()
+    
+    # Display header
+    display_header()
+    
+    # Display sidebar and validate environment
+    is_configured, batch_size, api_key = display_sidebar()
+    
+    if not is_configured:
+        st.stop()
+    
+    # Store batch_size and api_key in session state
+    st.session_state.batch_size = batch_size
+    st.session_state.api_key = api_key
+    
+    st.divider()
+    
+    # Create tabs for Stage 0, Stage 1, Stage 2, Stage 3, and Stage 4
+    tab0, tab1, tab2, tab3, tab4 = st.tabs([
+        "🔍 Stage 0: Filter Queries",
+        "📤 Stage 1: Upload & Process", 
+        "📥 Stage 2: Retrieve Data", 
+        "📧 Stage 3: Extract Emails", 
+        "📊 Stage 4: View Emails"
+    ])
+    
+    with tab0:
+        display_stage0_tab()
+    
+    with tab1:
+        # Upload section
+        uploaded_file = display_upload_section()
+    
+        # Process uploaded file
+        if uploaded_file is not None:
+            queries = load_csv_queries(uploaded_file)
+            
+            if queries:
+                st.session_state.queries_loaded = True
+                st.session_state.queries = queries
+                
+                st.divider()
+                
+                # Display queries preview
+                display_queries_preview(queries)
+                
+                st.divider()
+                
+                # Processing section
+                st.header("🚀 Processing")
+                
+                # Add automation mode selector
+                automation_mode = st.radio(
+                    "Select Processing Mode:",
+                    options=["🤖 Automated (Stage 1 → 2 → 3)", "📤 Manual (Stage 1 only)"],
+                    index=0,
+                    help="Automated: Runs all stages automatically | Manual: Only uploads queries"
+                )
+                
+                is_automated = automation_mode.startswith("🤖")
+                
+                start_button = st.button(
+                    "Process All" if is_automated else "Process",
+                    use_container_width=True,
+                    type="primary",
+                    key="stage1_process"
+                )
+                
+                if start_button:
+                    if queries:
+                        st.session_state.processing_started = True
+                        
+                        if is_automated:
+                            # ============================================
+                            # AUTOMATED PIPELINE
+                            # ============================================
+                            st.divider()
+                            st.header("🤖 Automated Pipeline")
+                            
+                            with st.spinner("Running automated pipeline..."):
+                                results = process_automated_pipeline(queries)
+                            
+                            if results:
+                                st.session_state.processing_complete = True
+                                st.session_state.results = results
+                        else:
+                            # ============================================
+                            # MANUAL MODE (Stage 1 only)
+                            # ============================================
+                            with st.spinner("Processing queries..."):
+                                results = process_queries(queries)
+                            
+                            if results:
+                                st.session_state.processing_complete = True
+                                st.session_state.results = results
+                                
+                                st.divider()
+                                display_results(results)
+                                
+                                # Download report option
+                                st.divider()
+                                st.subheader("📥 Export Results")
+                                
+                                report = f"""
+Email Scraper - Processing Report
+==================================
+
+Date: {pd.Timestamp.now()}
+Total Queries: {results['total_queries']}
+Total Batches: {results['total_batches']}
+Successful Snapshots: {results['successful_snapshots']}
+Failed Batches: {results['failed_batches']}
+Success Rate: {(results['successful_snapshots']/results['total_batches']*100):.1f}%
+"""
+                                
+                                st.download_button(
+                                    label="📊 Download Report",
+                                    data=report,
+                                    file_name="scraper_report.txt",
+                                    mime="text/plain"
+                                )
+                    else:
+                        st.error("No queries loaded")
+            else:
+                st.error("No queries found in CSV file")
+
+    
+    with tab2:
+        display_stage2_tab()
+    
+    with tab3:
+        display_stage3_tab()
+    
+    with tab4:
+        display_stage4_tab()
+
+
+if __name__ == "__main__":
+    try:
+        import pandas as pd
+    except ImportError:
+        st.error("Please install pandas: pip install pandas")
+        st.stop()
+    
+    main()
