@@ -15,7 +15,8 @@ from postgrest.types import CountMethod
 from dotenv import load_dotenv
 import logging
 
-# Load environment variables
+# Load environment variables from project-local .env reliably
+
 load_dotenv()
 
 # Configure logging

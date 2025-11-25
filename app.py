@@ -1,12 +1,10 @@
-"""
-Streamlit UI for Email Scraper - Brightdata API Integration
-"""
 
 import streamlit as st
 import csv
 import os
 import re
 import sys
+from pathlib import Path
 from io import StringIO
 from dotenv import load_dotenv
 
@@ -29,8 +27,13 @@ else:
         logger
     )
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from project-local .env reliably
+env_path = Path(__file__).resolve().parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path, override=False)
+else:
+    # Fallback to cwd search
+    load_dotenv()
 
 # Page Configuration
 st.set_page_config(
