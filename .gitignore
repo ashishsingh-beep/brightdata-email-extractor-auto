@@ -32,6 +32,9 @@ Thumbs.db
 *.json
 *.txt
 
+# Allow dependency manifest
+!requirements.txt
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
