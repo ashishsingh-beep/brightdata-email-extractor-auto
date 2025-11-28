@@ -330,11 +330,17 @@ def display_sidebar():
         
         # Bright Data API Key input
         st.subheader("Bright Data API Key")
-        api_key = st.text_input(
+        api_key_input = st.text_input(
             "Enter API Key",
             type="password",
             help="Your Bright Data API key"
         )
+        # Fallback to .env if sidebar is empty
+        api_key = api_key_input.strip() if api_key_input else (os.getenv('BRIGHTDATA_API_KEY') or '').strip()
+        if not api_key:
+            st.warning("Bright Data API key missing. Enter in sidebar or set BRIGHTDATA_API_KEY in .env.")
+        elif not api_key_input:
+            st.info("Using BRIGHTDATA_API_KEY from .env.")
         
         st.divider()
         

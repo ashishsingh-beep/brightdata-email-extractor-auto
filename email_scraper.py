@@ -71,32 +71,25 @@ class BrightdataClient:
             response.raise_for_status()
             
             data = response.json()
-            
+
             # Validate response
+            # New rule: Only treat status="running" as invalid. Do not invalidate
+            # responses based on presence of errors or small payload size.
             is_valid = True
             error_reason = ""
-            
-            # Condition 1: Check if status is "running"
+
             data_str = json.dumps(data)
             if '"status":"running"' in data_str or '"status": "running"' in data_str:
                 is_valid = False
                 error_reason = "Status is running"
                 logger.warning(f"Snapshot {snapshot_id} has status 'running' - invalid response")
-            
-            # Condition 2: Check if response contains "error" key AND size < 2000 bytes
-            elif 'error' in data_str.lower():
-                response_size = len(data_str.encode('utf-8'))
-                if response_size < 2000:
-                    is_valid = False
-                    error_reason = f"Contains error and size < 2000 bytes (actual: {response_size})"
-                    logger.warning(f"Snapshot {snapshot_id} contains error with size {response_size} bytes - invalid response")
-            
+
             # For backward compatibility: is_running = True if status is running
             is_running = not is_valid and "running" in error_reason
-            
+
             if is_valid:
                 logger.info(f"Successfully retrieved valid data for snapshot: {snapshot_id}")
-            
+
             return data, is_running, is_valid, error_reason
             
         except requests.exceptions.RequestException as e:
@@ -149,13 +142,19 @@ class BrightdataClient:
                 timeout=30
             )
             response.raise_for_status()
-            
+
             result = response.json()
             logger.info(f"Successfully received snapshot: {result.get('snapshot_id')}")
             return result
-            
+
+        except requests.exceptions.HTTPError as e:
+            # Log HTTP error details including response text when available
+            status = getattr(e.response, 'status_code', None)
+            text = getattr(e.response, 'text', '')
+            logger.error(f"HTTP error sending request to Brightdata: {status} {e}. Response: {text[:2000]}")
+            return None
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error sending request to Brightdata: {e}")
+            logger.error(f"Network error sending request to Brightdata: {e}")
             return None
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding response: {e}")
