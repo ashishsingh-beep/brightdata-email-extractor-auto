@@ -1500,8 +1500,8 @@ def display_stage4_tab():
             # Display only email column if exists, otherwise show all
             if 'email' in df.columns:
                 if 'created_at' in df.columns:
-                    df_display = df[['email', 'created_at']]
-                    df_display['created_at'] = pd.to_datetime(df_display['created_at']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    df_display = df[['email', 'created_at']].copy()
+                    df_display['created_at'] = pd.to_datetime(df_display['created_at'], format='ISO8601').dt.strftime('%Y-%m-%d %H:%M:%S')
                 else:
                     df_display = df[['email']]
                 
