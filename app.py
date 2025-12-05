@@ -1501,7 +1501,10 @@ def display_stage4_tab():
             if 'email' in df.columns:
                 if 'created_at' in df.columns:
                     df_display = df[['email', 'created_at']].copy()
-                    df_display['created_at'] = pd.to_datetime(df_display['created_at'], format='ISO8601').dt.strftime('%Y-%m-%d %H:%M:%S')
+                    # Robust parsing for ISO8601 with microseconds and timezone; coerce invalids
+                    parsed = pd.to_datetime(df_display['created_at'], errors='coerce', utc=True)
+                    # Convert to naive local time (UTC -> naive) for display
+                    df_display['created_at'] = parsed.dt.tz_convert(None).dt.strftime('%Y-%m-%d %H:%M:%S')
                 else:
                     df_display = df[['email']]
                 
