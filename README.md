@@ -81,9 +81,48 @@ Automation: When you choose “Automated (Stage 1 → 2 → 3)” in Stage 1, th
 - Bright Data: make sure the dataset is valid and the trigger URL is correct.
 
 ### 24/7 Worker (Windows)
-- A headless worker `worker.py` is included to run Stage 2 and Stage 3 continuously on a server.
-- It requires `BRIGHTDATA_API_KEY` in your `.env`.
-- See `docs/windows-24x7-setup.md` for Task Scheduler and NSSM service setup.
+- A headless worker `worker.py` runs Stage 2 + Stage 3 in one loop.
+- NEW: Two standalone servers to run stages separately:
+	- `stage2_server.py`: continuously retrieves Bright Data snapshots and saves responses.
+	- `stage3_server.py`: continuously extracts emails from saved responses.
+- Each server exposes simple HTTP endpoints:
+	- `GET /health` — returns current stats.
+	- `POST /run-once` — triggers a single pass immediately.
+	- `POST /stop` — requests graceful shutdown.
+- Requirements: set `BRIGHTDATA_API_KEY`, `BRIGHTDATA_URL`, `SUPABASE_URL`, `SUPABASE_KEY` in `.env`.
+
+#### Run locally (PowerShell)
+```powershell
+# Stage 2 server (port 9002)
+& ".\.venv\Scripts\python.exe" "stage2_server.py"
+
+# Stage 3 server (port 9003)
+& ".\.venv\Scripts\python.exe" "stage3_server.py"
+
+# Check health in another terminal
+Invoke-WebRequest -UseBasicParsing http://localhost:9002/health
+Invoke-WebRequest -UseBasicParsing http://localhost:9003/health
+
+# Trigger one pass
+Invoke-RestMethod -Method Post -Uri http://localhost:9002/run-once
+Invoke-RestMethod -Method Post -Uri http://localhost:9003/run-once
+
+# Stop servers
+Invoke-RestMethod -Method Post -Uri http://localhost:9002/stop
+Invoke-RestMethod -Method Post -Uri http://localhost:9003/stop
+```
+
+#### Windows Services (NSSM)
+- Install NSSM and create two services:
+	- `nssm install Stage2Server "C:\Users\Admin\brightdata-email-extractor-auto\.venv\Scripts\python.exe" "C:\Users\Admin\brightdata-email-extractor-auto\stage2_server.py"`
+	- `nssm install Stage3Server "C:\Users\Admin\brightdata-email-extractor-auto\.venv\Scripts\python.exe" "C:\Users\Admin\brightdata-email-extractor-auto\stage3_server.py"`
+- Set startup type to Automatic; configure stdout/stderr log files.
+- Ensure service working directory is the repo root so `.env` loads.
+
+#### Notes
+- Stage 2 and Stage 3 only communicate via Supabase tables—no direct coupling.
+- Stage 2 leaves "running" snapshots unprocessed for retry; uses NDJSON fallback on 422.
+- Stage 3 marks `is_email_extracted=true` even if zero emails found to avoid reprocessing.
 
 ### Useful Commands (PowerShell)
 ```powershell
@@ -93,6 +132,10 @@ Automation: When you choose “Automated (Stage 1 → 2 → 3)” in Stage 1, th
 # Run the app
 python -m streamlit run app.py
 python worker.py
+
+# Run separate servers
+python stage2_server.py
+python stage3_server.py
 
 # Freeze dependencies
 pip freeze > requirements.lock.txt
