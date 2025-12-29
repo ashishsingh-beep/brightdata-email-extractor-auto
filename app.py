@@ -15,14 +15,14 @@ if 'email_scraper' in sys.modules:
     importlib.reload(email_scraper)
     from email_scraper import (
         BrightdataClient,
-        SupabaseClient,
+        DatabaseClient,
         EmailScraperEngine,
         logger
     )
 else:
     from email_scraper import (
         BrightdataClient,
-        SupabaseClient,
+        DatabaseClient,
         EmailScraperEngine,
         logger
     )
@@ -92,8 +92,7 @@ def validate_environment():
     """Validate that all required environment variables are set"""
     required_vars = {
         'BRIGHTDATA_URL': os.getenv('BRIGHTDATA_URL'),
-        'SUPABASE_URL': os.getenv('SUPABASE_URL'),
-        'SUPABASE_KEY': os.getenv('SUPABASE_KEY')
+        'DATABASE_URL': os.getenv('DATABASE_URL')
     }
     
     missing = [key for key, value in required_vars.items() if not value]
@@ -201,20 +200,19 @@ def display_stage0_tab():
         
         st.divider()
         
-        # Initialize Supabase client
-        supabase_url = os.getenv('SUPABASE_URL') or ""
-        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        # Initialize Database client
+        database_url = os.getenv('DATABASE_URL') or ""
         
-        if not supabase_url or not supabase_key:
+        if not database_url:
             st.error("❌ Database configuration missing. Please check .env file.")
             return
         
         try:
-            supabase_client = SupabaseClient(supabase_url, supabase_key)
+            database_client = DatabaseClient(database_url)
             
             with st.spinner("🔍 Checking queries against database..."):
                 # Get existing queries from database
-                existing_queries = supabase_client.get_all_existing_queries()
+                existing_queries = database_client.get_all_existing_queries()
                 
                 # Filter queries
                 result = filter_queries(uploaded_queries, existing_queries)
@@ -317,7 +315,7 @@ def display_header():
     
     with col1:
         st.title("📧 Email Scraper")
-        st.markdown("*Powered by Bright Data & Supabase*")
+        st.markdown("*Powered by Bright Data & PostgreSQL*")
     
     with col2:
         st.info("v1.0", icon="ℹ️")
@@ -355,8 +353,7 @@ def display_sidebar():
             ### Setup Required
             Please configure your `.env` file with:
             - `BRIGHTDATA_URL`
-            - `SUPABASE_URL`
-            - `SUPABASE_KEY`
+            - `DATABASE_URL`
             """)
             return False, 2, None
         
@@ -459,14 +456,13 @@ def process_queries(queries):
         
         # Initialize clients
         brightdata_url = os.getenv('BRIGHTDATA_URL') or ""
-        supabase_url = os.getenv('SUPABASE_URL') or ""
-        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        database_url = os.getenv('DATABASE_URL') or ""
         
         brightdata_client = BrightdataClient(api_key, brightdata_url)
-        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        database_client = DatabaseClient(database_url)
         
         # Create engine and process
-        engine = EmailScraperEngine(brightdata_client, supabase_client)
+        engine = EmailScraperEngine(brightdata_client, database_client)
         
         # Create progress bar
         progress_bar = st.progress(0)
@@ -507,11 +503,10 @@ def process_automated_pipeline(queries):
         
         # Initialize clients
         brightdata_url = os.getenv('BRIGHTDATA_URL') or ""
-        supabase_url = os.getenv('SUPABASE_URL') or ""
-        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        database_url = os.getenv('DATABASE_URL') or ""
         
         brightdata_client = BrightdataClient(api_key, brightdata_url)
-        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        database_client = DatabaseClient(database_url)
         
         # ============================================
         # STAGE 1: Upload & Process Queries
@@ -520,7 +515,7 @@ def process_automated_pipeline(queries):
         stage1_status = st.empty()
         stage1_progress = st.progress(0)
         
-        engine = EmailScraperEngine(brightdata_client, supabase_client)
+        engine = EmailScraperEngine(brightdata_client, database_client)
         batch_size = st.session_state.get('batch_size', 2)
         
         stage1_status.info(f"📤 Uploading {len(queries)} queries in batches of {batch_size}...")
@@ -552,7 +547,7 @@ def process_automated_pipeline(queries):
             polling_progress.progress(poll_attempt / MAX_POLL_ATTEMPTS)
             
             # Check if any snapshots are ready
-            unprocessed = supabase_client.get_unprocessed_snapshots()
+            unprocessed = database_client.get_unprocessed_snapshots()
             
             if unprocessed:
                 # Try to retrieve at least one snapshot to check if ready
@@ -581,7 +576,7 @@ def process_automated_pipeline(queries):
         stage2_log = st.empty()
         
         # Get unprocessed snapshots
-        snapshots = supabase_client.get_unprocessed_snapshots()
+        snapshots = database_client.get_unprocessed_snapshots()
         total_snapshots = len(snapshots)
         
         if total_snapshots == 0:
@@ -616,16 +611,16 @@ def process_automated_pipeline(queries):
                     
                     if data:
                         # Save to response_table
-                        save_success, error_type = supabase_client.save_response(snapshot_id, data)
+                        save_success, error_type = database_client.save_response(snapshot_id, data)
                         
                         if save_success:
                             # Mark as processed
-                            supabase_client.mark_as_processed(snapshot_id)
+                            database_client.mark_as_processed(snapshot_id)
                             successful += 1
                             stage2_log.success(f"✅ [{idx+1}/{total_snapshots}] Saved: {snapshot_id}")
                         elif error_type == 'duplicate':
                             # Already exists, mark as processed
-                            supabase_client.mark_as_processed(snapshot_id)
+                            database_client.mark_as_processed(snapshot_id)
                             skipped += 1
                             stage2_log.info(f"ℹ️ [{idx+1}/{total_snapshots}] Duplicate: {snapshot_id}")
                         else:
@@ -663,7 +658,7 @@ def process_automated_pipeline(queries):
         stage3_log = st.empty()
         
         # Get unextracted responses
-        eligible_count = supabase_client.count_unextracted_responses()
+        eligible_count = database_client.count_unextracted_responses()
         
         if eligible_count == 0:
             stage3_status.warning("⚠️ No unextracted responses found")
@@ -685,7 +680,7 @@ def process_automated_pipeline(queries):
                 stage3_status.info(f"📦 Processing Batch {batch_num + 1}/{num_batches}")
                 
                 # Fetch current batch
-                rows = supabase_client.get_unextracted_responses(limit=BATCH_SIZE, offset=0)
+                rows = database_client.get_unextracted_responses(limit=BATCH_SIZE, offset=0)
                 
                 if not rows:
                     break
@@ -709,7 +704,7 @@ def process_automated_pipeline(queries):
                     
                     if emails:
                         for email in emails:
-                            success, error_type = supabase_client.save_email(email)
+                            success, error_type = database_client.save_email(email)
                             if success:
                                 total_emails_extracted += 1
                                 stage3_log.success(f"✅ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: {email}")
@@ -718,7 +713,7 @@ def process_automated_pipeline(queries):
                                 stage3_log.info(f"ℹ️ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: Duplicate {email}")
                     
                     # Mark as extracted
-                    if supabase_client.mark_email_extracted(snapshot_id):
+                    if database_client.mark_email_extracted(snapshot_id):
                         total_successful += 1
                     else:
                         total_failed += 1
@@ -826,7 +821,7 @@ def display_results(stats):
 
 def process_unprocessed_snapshots():
     """
-    Process all unprocessed snapshots from Supabase
+    Process all unprocessed snapshots from Database
     
     Returns:
         Dictionary with statistics about processed snapshots
@@ -850,14 +845,13 @@ def process_unprocessed_snapshots():
         
         # Initialize clients
         brightdata_url = os.getenv('BRIGHTDATA_URL') or ""
-        supabase_url = os.getenv('SUPABASE_URL') or ""
-        supabase_key = os.getenv('SUPABASE_KEY') or ""
+        database_url = os.getenv('DATABASE_URL') or ""
         
         brightdata_client = BrightdataClient(api_key, brightdata_url)
-        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        database_client = DatabaseClient(database_url)
         
         # Get unprocessed snapshots (now returns list of dicts with snapshot_id and query)
-        snapshots = supabase_client.get_unprocessed_snapshots()
+        snapshots = database_client.get_unprocessed_snapshots()
         
         if not snapshots:
             return {
@@ -931,11 +925,11 @@ def process_unprocessed_snapshots():
             
             # Process valid data
             if data:
-                # Save response to Supabase response_table
-                save_success, error_type = supabase_client.save_response(snapshot_id, data)
+                # Save response to Database response_table
+                save_success, error_type = database_client.save_response(snapshot_id, data)
                 if save_success:
                     # Mark as processed in snapshot_table
-                    if supabase_client.mark_as_processed(snapshot_id):
+                    if database_client.mark_as_processed(snapshot_id):
                         successful += 1
                         logger.info(f"Successfully processed snapshot {snapshot_id}")
                     else:
@@ -947,7 +941,7 @@ def process_unprocessed_snapshots():
                 elif error_type == 'duplicate':
                     duplicate_snapshots += 1
                     # Still mark as processed since response already exists
-                    supabase_client.mark_as_processed(snapshot_id)
+                    database_client.mark_as_processed(snapshot_id)
                 else:
                     failed += 1
                     db_errors += 1
@@ -999,12 +993,11 @@ def display_stage2_tab():
     st.header("📥 Stage 2: Retrieve Snapshot Data")
     
     # Initialize clients to get count
-    supabase_url = os.getenv('SUPABASE_URL') or ""
-    supabase_key = os.getenv('SUPABASE_KEY') or ""
-    supabase_client = SupabaseClient(supabase_url, supabase_key)
+    database_url = os.getenv('DATABASE_URL') or ""
+    database_client = DatabaseClient(database_url)
     
     # Get unprocessed snapshots (returns list of dicts with snapshot_id and query)
-    snapshots = supabase_client.get_unprocessed_snapshots()
+    snapshots = database_client.get_unprocessed_snapshots()
     eligible_count = len(snapshots)
     
     col1, col2 = st.columns([1, 1])
@@ -1131,10 +1124,9 @@ def process_all_responses_for_emails(total_count: int):
         Dictionary with extraction statistics
     """
     try:
-        # Initialize Supabase client
-        supabase_url = os.getenv('SUPABASE_URL') or ""
-        supabase_key = os.getenv('SUPABASE_KEY') or ""
-        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        # Initialize Database client
+        database_url = os.getenv('DATABASE_URL') or ""
+        database_client = DatabaseClient(database_url)
         
         BATCH_SIZE = 20
         num_batches = (total_count + BATCH_SIZE - 1) // BATCH_SIZE
@@ -1158,7 +1150,7 @@ def process_all_responses_for_emails(total_count: int):
             batch_status.info(f"📦 Processing Batch {batch_num + 1}/{num_batches}")
             
             # Fetch current batch (always from offset 0 since we mark as extracted)
-            rows = supabase_client.get_unextracted_responses(limit=BATCH_SIZE, offset=0)
+            rows = database_client.get_unextracted_responses(limit=BATCH_SIZE, offset=0)
             
             if not rows:
                 batch_status.warning(f"Batch {batch_num + 1}: No more rows to process")
@@ -1185,7 +1177,7 @@ def process_all_responses_for_emails(total_count: int):
                 if emails:
                     # Save each email
                     for email in emails:
-                        success, error_type = supabase_client.save_email(email)
+                        success, error_type = database_client.save_email(email)
                         if success:
                             batch_emails += 1
                             email_log.success(f"✅ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: Saved {email}")
@@ -1197,7 +1189,7 @@ def process_all_responses_for_emails(total_count: int):
                             email_log.error(f"❌ Batch {batch_num + 1} [{idx + 1}/{batch_total}]: Failed {email}")
                 
                 # Mark as extracted
-                if supabase_client.mark_email_extracted(snapshot_id):
+                if database_client.mark_email_extracted(snapshot_id):
                     total_successful += 1
                 else:
                     total_failed += 1
@@ -1245,7 +1237,7 @@ def process_all_responses_for_emails(total_count: int):
 
 def process_responses_for_emails(batch_size: int = 20):
     """
-    Process unextracted responses from Supabase and extract emails
+    Process unextracted responses from Database and extract emails
     DEPRECATED: Use process_all_responses_for_emails instead
     
     Args:
@@ -1255,10 +1247,9 @@ def process_responses_for_emails(batch_size: int = 20):
         Dictionary with extraction statistics
     """
     try:
-        # Initialize Supabase client
-        supabase_url = os.getenv('SUPABASE_URL') or ""
-        supabase_key = os.getenv('SUPABASE_KEY') or ""
-        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        # Initialize Database client
+        database_url = os.getenv('DATABASE_URL') or ""
+        database_client = DatabaseClient(database_url)
         
         # Fetch in sub-batches of 20 to avoid timeout
         SUB_BATCH_SIZE = 20
@@ -1266,7 +1257,7 @@ def process_responses_for_emails(batch_size: int = 20):
         
         for offset in range(0, batch_size, SUB_BATCH_SIZE):
             current_limit = min(SUB_BATCH_SIZE, batch_size - offset)
-            rows_batch = supabase_client.get_unextracted_responses(limit=current_limit, offset=offset)
+            rows_batch = database_client.get_unextracted_responses(limit=current_limit, offset=offset)
             all_rows.extend(rows_batch)
             if len(rows_batch) < current_limit:
                 # No more rows available
@@ -1310,7 +1301,7 @@ def process_responses_for_emails(batch_size: int = 20):
             if emails:
                 # Save each email individually
                 for email in emails:
-                    success, error_type = supabase_client.save_email(email)
+                    success, error_type = database_client.save_email(email)
                     if success:
                         total_emails_extracted += 1
                         email_log.success(f"✅ Saved: {email}")
@@ -1325,7 +1316,7 @@ def process_responses_for_emails(batch_size: int = 20):
                 logger.info(f"Extracted {len(emails)} emails from snapshot {row['snapshot_id']}")
             
             # Mark as extracted regardless of whether emails were found
-            if supabase_client.mark_email_extracted(row['snapshot_id']):
+            if database_client.mark_email_extracted(row['snapshot_id']):
                 successful += 1
             else:
                 failed += 1
@@ -1366,12 +1357,11 @@ def display_stage3_tab():
     st.header("📧 Stage 3: Extract Emails")
     
     # Initialize clients to get count
-    supabase_url = os.getenv('SUPABASE_URL') or ""
-    supabase_key = os.getenv('SUPABASE_KEY') or ""
-    supabase_client = SupabaseClient(supabase_url, supabase_key)
+    database_url = os.getenv('DATABASE_URL') or ""
+    database_client = DatabaseClient(database_url)
     
     # Get unextracted count
-    eligible_count = supabase_client.count_unextracted_responses()
+    eligible_count = database_client.count_unextracted_responses()
     
     # Calculate number of batches
     BATCH_SIZE = 20
@@ -1457,10 +1447,9 @@ def display_stage4_tab():
     )
     
     if fetch_button:
-        # Initialize Supabase client
-        supabase_url = os.getenv('SUPABASE_URL') or ""
-        supabase_key = os.getenv('SUPABASE_KEY') or ""
-        supabase_client = SupabaseClient(supabase_url, supabase_key)
+        # Initialize Database client
+        database_url = os.getenv('DATABASE_URL') or ""
+        database_client = DatabaseClient(database_url)
         
         # Convert dates to string format if provided
         start_date_str = None
@@ -1481,7 +1470,7 @@ def display_stage4_tab():
                 end_date_str = end_date.strftime('%Y-%m-%d')
         
         with st.spinner("Fetching emails..."):
-            emails = supabase_client.get_emails_by_date(start_date_str, end_date_str)
+            emails = database_client.get_emails_by_date(start_date_str, end_date_str)
         
         st.divider()
         

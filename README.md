@@ -1,6 +1,6 @@
 ## Bright Data Email Extractor (Auto)
 
-Streamlit app that sends search queries to Bright Data, stores snapshot metadata in Supabase, retrieves results, extracts emails, and provides export/view capabilities.
+Streamlit app that sends search queries to Bright Data, stores snapshot metadata in PostgreSQL, retrieves results, extracts emails, and provides export/view capabilities.
 
 ### Overview
 - Stage 0: Filter queries (remove CSV duplicates and already-seen queries in DB)
@@ -11,7 +11,7 @@ Streamlit app that sends search queries to Bright Data, stores snapshot metadata
 
 ### Prerequisites
 - Python 3.12 or 3.13 (Windows)
-- Supabase project with the required tables
+- Local PostgreSQL database
 - Bright Data dataset trigger URL and API key
 
 ### Quick Start (Windows PowerShell)
@@ -29,41 +29,42 @@ pip install -r requirements.txt
 # 4) Create .env in project root
 @"
 BRIGHTDATA_URL=https://api.brightdata.com/datasets/v3/trigger?dataset_id=YOUR_DATASET_ID
-SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-SUPABASE_KEY=YOUR_SERVICE_ROLE_OR_ANON_KEY
+DATABASE_URL=postgresql://postgres:password@localhost:5432/brightdata_db
 "@ | Out-File -Encoding UTF8 .env
 
-# 5) Run the Streamlit app (always via venv Python)
+# 5) Initialize Database
+python setup_database.py
+
+# 6) Run the Streamlit app (always via venv Python)
 python -m streamlit run app.py
 ```
 
 ### Environment Variables (.env)
 - `BRIGHTDATA_URL`: Bright Data dataset trigger URL (v3). The app derives snapshot fetch URL from this.
-- `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_KEY`: Supabase service role or anon key that can read/write the required tables
+- `DATABASE_URL`: PostgreSQL connection string (e.g., `postgresql://user:pass@localhost:5432/dbname`)
 
 Optional (used by `email_scraper.py` CLI example):
 - `BRIGHTDATA_API_KEY`: Bright Data API key (in the UI, you can also paste it in the sidebar)
 
 Example file: see `.env.example` in the repo.
 
-### Supabase Schema
+### Database Schema
 Your project should have these tables/columns (names used by the app):
 - `snapshot_table`
 	- `snapshot_id` (text, primary/unique)
 	- `processed` (boolean, default false)
-	- `query` (text[] array; see `database_migration.sql`)
-	- `created_at` (timestamp with time zone, default now())
+	- `query` (text[] array)
+	- `created_at` (timestamp, default now())
 - `response_table`
 	- `snapshot_id` (text, primary/unique)
 	- `response` (jsonb)
 	- `is_email_extracted` (boolean, default false)
-	- `created_at` (timestamp with time zone, default now())
+	- `created_at` (timestamp, default now())
 - `email_table`
 	- `email` (text, primary/unique)
-	- `created_at` (timestamp with time zone, default now())
+	- `created_at` (timestamp, default now())
 
-Run `database_migration.sql` to add the `query` column and index to `snapshot_table`.
+Run `python setup_database.py` to create these tables automatically.
 
 ### How It Works (Stages)
 - Stage 0 — Filter Queries: upload CSV, de-duplicate within CSV and against `snapshot_table.query`, download filtered CSV.
@@ -77,7 +78,7 @@ Automation: When you choose “Automated (Stage 1 → 2 → 3)” in Stage 1, th
 ### Troubleshooting
 - Always activate the venv before running Streamlit. Mixing global/site-packages can cause import or type errors.
 - Ensure your `.env` is at the project root and readable.
-- Verify Supabase keys have insert/select/update permissions on the three tables.
+- Verify PostgreSQL connection string is correct and the database exists.
 - Bright Data: make sure the dataset is valid and the trigger URL is correct.
 
 ### 24/7 Worker (Windows)
@@ -89,7 +90,7 @@ Automation: When you choose “Automated (Stage 1 → 2 → 3)” in Stage 1, th
 	- `GET /health` — returns current stats.
 	- `POST /run-once` — triggers a single pass immediately.
 	- `POST /stop` — requests graceful shutdown.
-- Requirements: set `BRIGHTDATA_API_KEY`, `BRIGHTDATA_URL`, `SUPABASE_URL`, `SUPABASE_KEY` in `.env`.
+- Requirements: set `BRIGHTDATA_API_KEY`, `BRIGHTDATA_URL`, `DATABASE_URL` in `.env`.
 
 #### Run locally (PowerShell)
 ```powershell

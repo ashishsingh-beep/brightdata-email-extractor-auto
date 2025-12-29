@@ -1,7 +1,7 @@
 """
-Email Scraper Script - Brightdata API Integration with Supabase Storage
+Email Scraper Script - Brightdata API Integration with PostgreSQL Storage
 This script processes search queries, sends them to Brightdata API in batches,
-and stores the snapshot IDs in Supabase.
+and stores the snapshot IDs in PostgreSQL.
 """
 
 import requests
@@ -10,8 +10,8 @@ import time
 import os
 import csv
 from typing import List, Dict, Optional
-from supabase import create_client, Client
-from postgrest.types import CountMethod
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from dotenv import load_dotenv
 import logging
 
@@ -30,9 +30,8 @@ logger = logging.getLogger(__name__)
 BRIGHTDATA_URL = os.getenv('BRIGHTDATA_URL', "")
 BRIGHTDATA_API_KEY = os.getenv('BRIGHTDATA_API_KEY', "")
 
-# Supabase Configuration
-SUPABASE_URL = os.getenv('SUPABASE_URL', "")
-SUPABASE_KEY = os.getenv('SUPABASE_KEY', "")
+# Database Configuration
+DATABASE_URL = os.getenv('DATABASE_URL', "postgresql://postgres:password@localhost:5432/brightdata_db")
 
 
 class BrightdataClient:
@@ -161,15 +160,15 @@ class BrightdataClient:
             return None
 
 
-class SupabaseClient:
-    """Client for interacting with Supabase"""
+class DatabaseClient:
+    """Client for interacting with Local PostgreSQL Database"""
     
-    def __init__(self, url: str, key: str):
-        self.client: Client = create_client(url, key)
+    def __init__(self, connection_string: str):
+        self.engine = create_engine(connection_string)
     
     def save_snapshot(self, snapshot_id: str, queries: List[str] = None) -> bool:
         """
-        Save snapshot ID with associated queries to Supabase
+        Save snapshot ID with associated queries to Database
         
         Args:
             snapshot_id: The snapshot ID from Brightdata
@@ -179,18 +178,18 @@ class SupabaseClient:
             True if successful, False otherwise
         """
         try:
-            data = {
-                'snapshot_id': snapshot_id,
-                'query': queries if queries else [],
-                'processed': False
-            }
-            
-            response = self.client.table('snapshot_table').insert(data).execute()
-            logger.info(f"Snapshot {snapshot_id} saved to Supabase with {len(queries) if queries else 0} queries")
+            query_list = queries if queries else []
+            with self.engine.connect() as conn:
+                conn.execute(
+                    text("INSERT INTO snapshot_table (snapshot_id, query, processed) VALUES (:snapshot_id, :query, :processed)"),
+                    {"snapshot_id": snapshot_id, "query": query_list, "processed": False}
+                )
+                conn.commit()
+            logger.info(f"Snapshot {snapshot_id} saved to Database with {len(query_list)} queries")
             return True
             
-        except Exception as e:
-            logger.error(f"Error saving snapshot to Supabase: {e}")
+        except SQLAlchemyError as e:
+            logger.error(f"Error saving snapshot to Database: {e}")
             return False
     
     def get_all_existing_queries(self) -> List[str]:
@@ -201,22 +200,21 @@ class SupabaseClient:
             List of lowercase queries for case-insensitive comparison
         """
         try:
-            response = self.client.table('snapshot_table').select('query').execute()
+            with self.engine.connect() as conn:
+                result = conn.execute(text("SELECT query FROM snapshot_table"))
+                rows = result.fetchall()
             
             all_queries = []
-            if response.data:
-                for row in response.data:
-                    queries = row.get('query', [])
-                    if queries:
-                        # Flatten and convert to lowercase
-                        all_queries.extend([q.lower().strip() for q in queries if q])
+            for row in rows:
+                queries = row[0] # query column is index 0
+                if queries:
+                    all_queries.extend([q.lower().strip() for q in queries if q])
             
-            # Return unique queries
             unique_queries = list(set(all_queries))
             logger.info(f"Found {len(unique_queries)} unique queries in database")
             return unique_queries
             
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error fetching existing queries: {e}")
             return []
     
@@ -228,19 +226,21 @@ class SupabaseClient:
             List of dictionaries with snapshot_id and query arrays
         """
         try:
-            response = self.client.table('snapshot_table').select('snapshot_id, query').eq('processed', False).execute()
+            with self.engine.connect() as conn:
+                result = conn.execute(text("SELECT snapshot_id, query FROM snapshot_table WHERE processed = FALSE"))
+                rows = result.mappings().all()
             
-            snapshots = response.data if response.data else []
+            snapshots = [dict(row) for row in rows]
             logger.info(f"Found {len(snapshots)} unprocessed snapshots")
             return snapshots
             
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error fetching unprocessed snapshots: {e}")
             return []
     
     def mark_as_processed(self, snapshot_id: str) -> bool:
         """
-        Mark a snapshot as processed in Supabase
+        Mark a snapshot as processed in Database
         
         Args:
             snapshot_id: The snapshot ID to mark as processed
@@ -249,17 +249,22 @@ class SupabaseClient:
             True if successful, False otherwise
         """
         try:
-            response = self.client.table('snapshot_table').update({'processed': True}).eq('snapshot_id', snapshot_id).execute()
+            with self.engine.connect() as conn:
+                conn.execute(
+                    text("UPDATE snapshot_table SET processed = TRUE WHERE snapshot_id = :snapshot_id"),
+                    {"snapshot_id": snapshot_id}
+                )
+                conn.commit()
             logger.info(f"Marked snapshot {snapshot_id} as processed")
             return True
             
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error marking snapshot as processed: {e}")
             return False
     
     def save_email(self, email: str) -> tuple[bool, str]:
         """
-        Save a single email to Supabase email_table
+        Save a single email to Database email_table
         
         Args:
             email: Email address to save
@@ -269,25 +274,28 @@ class SupabaseClient:
             error_type can be: '' (success), 'duplicate', 'error'
         """
         try:
-            data = {'email': email}
-            
-            response = self.client.table('email_table').insert(data).execute()
-            logger.info(f"Saved email {email} to Supabase")
+            with self.engine.connect() as conn:
+                # Use ON CONFLICT DO NOTHING to handle duplicates gracefully
+                result = conn.execute(
+                    text("INSERT INTO email_table (email) VALUES (:email) ON CONFLICT (email) DO NOTHING"),
+                    {"email": email}
+                )
+                conn.commit()
+                
+                if result.rowcount == 0:
+                    logger.warning(f"Duplicate email {email}")
+                    return False, 'duplicate'
+                
+            logger.info(f"Saved email {email} to Database")
             return True, ''
             
-        except Exception as e:
-            error_str = str(e)
-            # Check if it's a duplicate key error
-            if 'duplicate' in error_str.lower() or 'unique' in error_str.lower():
-                logger.warning(f"Duplicate email {email}")
-                return False, 'duplicate'
-            else:
-                logger.error(f"Error saving email to Supabase: {e}")
-                return False, 'error'
+        except SQLAlchemyError as e:
+            logger.error(f"Error saving email to Database: {e}")
+            return False, 'error'
     
     def save_response(self, snapshot_id: str, response_data: dict) -> tuple[bool, str]:
         """
-        Save snapshot response to Supabase response_table
+        Save snapshot response to Database response_table
         
         Args:
             snapshot_id: The snapshot ID
@@ -298,25 +306,25 @@ class SupabaseClient:
             error_type can be: '' (success), 'duplicate', 'error'
         """
         try:
-            data = {
-                'snapshot_id': snapshot_id,
-                'response': response_data,
-                'is_email_extracted': False
-            }
+            import json
+            with self.engine.connect() as conn:
+                try:
+                    conn.execute(
+                        text("INSERT INTO response_table (snapshot_id, response, is_email_extracted) VALUES (:snapshot_id, :response, :is_email_extracted)"),
+                        {"snapshot_id": snapshot_id, "response": json.dumps(response_data), "is_email_extracted": False}
+                    )
+                    conn.commit()
+                    logger.info(f"Saved response for snapshot {snapshot_id} to Database")
+                    return True, ''
+                except SQLAlchemyError as e:
+                    if 'unique constraint' in str(e).lower():
+                        logger.warning(f"Duplicate snapshot {snapshot_id}")
+                        return False, 'duplicate'
+                    raise e
             
-            response = self.client.table('response_table').insert(data).execute()
-            logger.info(f"Saved response for snapshot {snapshot_id} to Supabase")
-            return True, ''
-            
-        except Exception as e:
-            error_str = str(e)
-            # Check if it's a duplicate key error
-            if 'duplicate' in error_str.lower() or 'unique' in error_str.lower():
-                logger.warning(f"Duplicate snapshot {snapshot_id}")
-                return False, 'duplicate'
-            else:
-                logger.error(f"Error saving response to Supabase: {e}")
-                return False, 'error'
+        except SQLAlchemyError as e:
+            logger.error(f"Error saving response to Database: {e}")
+            return False, 'error'
     
     def get_unextracted_responses(self, limit: int = 20, offset: int = 0) -> List[Dict]:
         """
@@ -330,13 +338,24 @@ class SupabaseClient:
             List of dictionaries with snapshot_id and response data
         """
         try:
-            response = self.client.table('response_table').select('snapshot_id, response').eq('is_email_extracted', False).range(offset, offset + limit - 1).execute()
+            with self.engine.connect() as conn:
+                result = conn.execute(
+                    text("SELECT snapshot_id, response FROM response_table WHERE is_email_extracted = FALSE LIMIT :limit OFFSET :offset"),
+                    {"limit": limit, "offset": offset}
+                )
+                rows = result.mappings().all()
             
-            rows = response.data if response.data else []
-            logger.info(f"Found {len(rows)} unextracted responses (limit: {limit}, offset: {offset})")
-            return rows
+            data = []
+            for row in rows:
+                data.append({
+                    "snapshot_id": row["snapshot_id"],
+                    "response": row["response"]
+                })
+                
+            logger.info(f"Found {len(data)} unextracted responses (limit: {limit}, offset: {offset})")
+            return data
             
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error fetching unextracted responses: {e}")
             return []
     
@@ -348,14 +367,13 @@ class SupabaseClient:
             Count of rows where is_email_extracted = false
         """
         try:
-            # Use CountMethod.exact to get count efficiently without fetching data
-            response = self.client.table('response_table').select('*', count=CountMethod.exact).eq('is_email_extracted', False).limit(0).execute()
-            
-            count = response.count if hasattr(response, 'count') and response.count is not None else 0
+            with self.engine.connect() as conn:
+                result = conn.execute(text("SELECT COUNT(*) FROM response_table WHERE is_email_extracted = FALSE"))
+                count = result.scalar()
             logger.info(f"Total unextracted responses: {count}")
             return count
             
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error counting unextracted responses: {e}")
             return 0
     
@@ -370,11 +388,16 @@ class SupabaseClient:
             True if successful, False otherwise
         """
         try:
-            response = self.client.table('response_table').update({'is_email_extracted': True}).eq('snapshot_id', snapshot_id).execute()
+            with self.engine.connect() as conn:
+                conn.execute(
+                    text("UPDATE response_table SET is_email_extracted = TRUE WHERE snapshot_id = :snapshot_id"),
+                    {"snapshot_id": snapshot_id}
+                )
+                conn.commit()
             logger.info(f"Marked snapshot {snapshot_id} as email extracted")
             return True
             
-        except Exception as e:
+        except SQLAlchemyError as e:
             logger.error(f"Error marking snapshot as extracted: {e}")
             return False
     
@@ -390,26 +413,39 @@ class SupabaseClient:
             List of dictionaries with email data
         """
         try:
-            query = self.client.table('email_table').select('*')
+            query_str = "SELECT * FROM email_table"
+            params = {}
+            conditions = []
             
-            # Apply date filters if provided
             if start_date:
-                query = query.gte('created_at', start_date)
+                conditions.append("created_at >= :start_date")
+                params["start_date"] = start_date
             if end_date:
-                # Add one day to include the entire end_date
                 from datetime import datetime, timedelta
                 end_datetime = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
-                query = query.lt('created_at', end_datetime.strftime('%Y-%m-%d'))
+                conditions.append("created_at < :end_date")
+                params["end_date"] = end_datetime.strftime('%Y-%m-%d')
             
-            # Order by created_at descending
-            query = query.order('created_at', desc=True)
+            if conditions:
+                query_str += " WHERE " + " AND ".join(conditions)
             
-            response = query.execute()
-            rows = response.data if response.data else []
-            logger.info(f"Found {len(rows)} emails")
-            return rows
+            query_str += " ORDER BY created_at DESC"
             
-        except Exception as e:
+            with self.engine.connect() as conn:
+                result = conn.execute(text(query_str), params)
+                rows = result.mappings().all()
+            
+            data = []
+            for row in rows:
+                row_dict = dict(row)
+                if 'created_at' in row_dict and row_dict['created_at']:
+                    row_dict['created_at'] = str(row_dict['created_at'])
+                data.append(row_dict)
+                
+            logger.info(f"Found {len(data)} emails")
+            return data
+            
+        except SQLAlchemyError as e:
             logger.error(f"Error fetching emails: {e}")
             return []
 
@@ -417,13 +453,13 @@ class SupabaseClient:
 class EmailScraperEngine:
     """Main engine for orchestrating the scraping process"""
     
-    def __init__(self, brightdata_client: BrightdataClient, supabase_client: SupabaseClient):
+    def __init__(self, brightdata_client: BrightdataClient, database_client: DatabaseClient):
         self.brightdata = brightdata_client
-        self.supabase = supabase_client
+        self.database = database_client
     
     def process_queries(self, queries: List[str], batch_size: int = 2) -> Dict[str, any]:
         """
-        Process search queries in batches and save snapshots to Supabase
+        Process search queries in batches and save snapshots to Database
         
         Args:
             queries: List of search queries to process
@@ -455,8 +491,8 @@ class EmailScraperEngine:
             if response and 'snapshot_id' in response:
                 snapshot_id = response['snapshot_id']
                 
-                # Save to Supabase with query array
-                if self.supabase.save_snapshot(snapshot_id, batch):
+                # Save to Database with query array
+                if self.database.save_snapshot(snapshot_id, batch):
                     successful_snapshots += 1
                     submitted_ids.append(snapshot_id)
                     snapshot_query_map[snapshot_id] = batch
@@ -498,10 +534,10 @@ def main():
     try:
         # Initialize clients
         brightdata_client = BrightdataClient(BRIGHTDATA_API_KEY, BRIGHTDATA_URL)
-        supabase_client = SupabaseClient(SUPABASE_URL, SUPABASE_KEY)
+        database_client = DatabaseClient(DATABASE_URL)
         
         # Create engine and process queries
-        engine = EmailScraperEngine(brightdata_client, supabase_client)
+        engine = EmailScraperEngine(brightdata_client, database_client)
         stats = engine.process_queries(queries)
         
         # Log final statistics

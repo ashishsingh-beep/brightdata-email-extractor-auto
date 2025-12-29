@@ -6,7 +6,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-from email_scraper import SupabaseClient, logger
+
+from email_scraper import DatabaseClient, logger
+
 
 
 def extract_emails_from_text(text: str) -> list:
@@ -33,11 +35,10 @@ class Stage3Service:
             "duplicates": 0,
             "failed": 0,
         }
-        supabase_url = os.getenv("SUPABASE_URL") or ""
-        supabase_key = os.getenv("SUPABASE_KEY") or ""
-        if not supabase_url or not supabase_key:
+        database_url = os.getenv("DATABASE_URL") or ""
+        if not database_url:
             raise RuntimeError("Missing environment variables for Stage3Service")
-        self.supabase = SupabaseClient(supabase_url, supabase_key)
+        self.database = DatabaseClient(database_url)
 
     def run_once(self, batch_size: int = 20):
         self.stats.update({
@@ -47,7 +48,7 @@ class Stage3Service:
             "duplicates": 0,
             "failed": 0,
         })
-        rows = self.supabase.get_unextracted_responses(limit=batch_size, offset=0) or []
+        rows = self.database.get_unextracted_responses(limit=batch_size, offset=0) or []
         for row in rows:
             if self._stop.is_set():
                 break
@@ -56,7 +57,7 @@ class Stage3Service:
             try:
                 emails = extract_emails_from_json(response_data) if response_data else []
                 for email in emails:
-                    ok, err = self.supabase.save_email(email)
+                    ok, err = self.database.save_email(email)
                     if ok:
                         self.stats["emails_saved"] += 1
                     elif err == "duplicate":
@@ -64,7 +65,7 @@ class Stage3Service:
                     else:
                         self.stats["failed"] += 1
                         logger.error(f"Stage3 failed saving email {email}")
-                if self.supabase.mark_email_extracted(snapshot_id):
+                if self.database.mark_email_extracted(snapshot_id):
                     self.stats["rows_processed"] += 1
                 else:
                     self.stats["failed"] += 1

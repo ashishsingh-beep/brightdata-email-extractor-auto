@@ -1,6 +1,6 @@
 streamlit
 python-dotenv
 requests
-supabase
-postgrest
 pandas
+sqlalchemy
+psycopg2-binary

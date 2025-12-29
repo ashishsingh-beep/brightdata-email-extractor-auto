@@ -5,7 +5,7 @@ This guide shows how to run a background worker continuously on Windows so Stage
 ## Prerequisites
 - Python virtual environment created in project root: `.venv/`
 - Dependencies installed: `pip install -r requirements.txt`
-- `.env` present in project root with `BRIGHTDATA_URL`, `SUPABASE_URL`, `SUPABASE_KEY` (and optional `BRIGHTDATA_API_KEY`)
+- `.env` present in project root with `BRIGHTDATA_URL`, `DATABASE_URL` (and optional `BRIGHTDATA_API_KEY`)
 - Project path example used below: `C:\Users\Sane Alam\brightdata-email-extractor-auto`
 
 ## Option A — Windows Task Scheduler (Simple, periodic)

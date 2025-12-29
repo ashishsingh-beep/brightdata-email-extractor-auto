@@ -5,7 +5,7 @@ import sys
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
 
-from email_scraper import BrightdataClient, SupabaseClient
+from email_scraper import BrightdataClient, DatabaseClient
 
 
 def setup_logging():
@@ -19,8 +19,7 @@ def setup_logging():
 def validate_env() -> tuple[bool, str]:
     required = {
         "BRIGHTDATA_URL": os.getenv("BRIGHTDATA_URL"),
-        "SUPABASE_URL": os.getenv("SUPABASE_URL"),
-        "SUPABASE_KEY": os.getenv("SUPABASE_KEY"),
+        "DATABASE_URL": os.getenv("DATABASE_URL"),
         "BRIGHTDATA_API_KEY": os.getenv("BRIGHTDATA_API_KEY"),
     }
     missing = [k for k, v in required.items() if not v]
@@ -42,8 +41,8 @@ def extract_emails_from_json(json_data) -> List[str]:
     return extract_emails_from_text(data_str)
 
 
-def process_stage2(bright: BrightdataClient, supa: SupabaseClient) -> Dict[str, int]:
-    snapshots = supa.get_unprocessed_snapshots()
+def process_stage2(bright: BrightdataClient, db: DatabaseClient) -> Dict[str, int]:
+    snapshots = db.get_unprocessed_snapshots()
     total = len(snapshots) if snapshots else 0
     successful = 0
     failed = 0
@@ -71,13 +70,13 @@ def process_stage2(bright: BrightdataClient, supa: SupabaseClient) -> Dict[str, 
                 logging.warning(f"Stage2 no data: {snapshot_id} ({error_reason})")
                 continue
 
-            ok, err_type = supa.save_response(snapshot_id, data)
+            ok, err_type = db.save_response(snapshot_id, data)
             if ok:
-                supa.mark_as_processed(snapshot_id)
+                db.mark_as_processed(snapshot_id)
                 successful += 1
                 logging.info(f"Stage2 saved: {snapshot_id}")
             elif err_type == "duplicate":
-                supa.mark_as_processed(snapshot_id)
+                db.mark_as_processed(snapshot_id)
                 skipped += 1
                 logging.info(f"Stage2 duplicate: {snapshot_id}")
             else:
@@ -92,7 +91,7 @@ def process_stage2(bright: BrightdataClient, supa: SupabaseClient) -> Dict[str, 
     return {"total": total, "successful": successful, "failed": failed, "skipped": skipped}
 
 
-def process_stage3(supa: SupabaseClient, batch_size: int = 20) -> Dict[str, int]:
+def process_stage3(db: DatabaseClient, batch_size: int = 20) -> Dict[str, int]:
     total_processed = 0
     total_successful = 0
     total_failed = 0
@@ -100,7 +99,7 @@ def process_stage3(supa: SupabaseClient, batch_size: int = 20) -> Dict[str, int]
     total_duplicates = 0
 
     while True:
-        rows = supa.get_unextracted_responses(limit=batch_size, offset=0)
+        rows = db.get_unextracted_responses(limit=batch_size, offset=0)
         if not rows:
             break
 
@@ -116,13 +115,13 @@ def process_stage3(supa: SupabaseClient, batch_size: int = 20) -> Dict[str, int]
                 emails = extract_emails_from_json(response_data)
                 if emails:
                     for email in emails:
-                        ok, err = supa.save_email(email)
+                        ok, err = db.save_email(email)
                         if ok:
                             total_emails += 1
                         elif err == "duplicate":
                             total_duplicates += 1
 
-                if supa.mark_email_extracted(snapshot_id):
+                if db.mark_email_extracted(snapshot_id):
                     total_successful += 1
                 else:
                     total_failed += 1
@@ -155,18 +154,17 @@ def main():
 
     api_key = os.getenv("BRIGHTDATA_API_KEY", "")
     brightdata_url = os.getenv("BRIGHTDATA_URL", "")
-    supabase_url = os.getenv("SUPABASE_URL", "")
-    supabase_key = os.getenv("SUPABASE_KEY", "")
+    database_url = os.getenv("DATABASE_URL", "")
 
     bright = BrightdataClient(api_key, brightdata_url)
-    supa = SupabaseClient(supabase_url, supabase_key)
+    db = DatabaseClient(database_url)
 
     idle_sleep = int(os.getenv("WORKER_IDLE_SLEEP", "30"))
 
     logging.info("Worker started: Stage 2 + Stage 3 loop")
     while True:
-        s2 = process_stage2(bright, supa)
-        s3 = process_stage3(supa)
+        s2 = process_stage2(bright, db)
+        s3 = process_stage3(db)
 
         logging.info(
             f"Stage2 total={s2['total']} ok={s2['successful']} skip={s2['skipped']} fail={s2['failed']} | "

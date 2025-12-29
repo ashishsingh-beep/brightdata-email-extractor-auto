@@ -6,7 +6,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-from email_scraper import BrightdataClient, SupabaseClient, logger
+from email_scraper import BrightdataClient, DatabaseClient, logger
 
 
 class Stage2Service:
@@ -24,12 +24,11 @@ class Stage2Service:
         }
         api_key = (os.getenv("BRIGHTDATA_API_KEY") or "").strip()
         brightdata_url = os.getenv("BRIGHTDATA_URL") or ""
-        supabase_url = os.getenv("SUPABASE_URL") or ""
-        supabase_key = os.getenv("SUPABASE_KEY") or ""
-        if not api_key or not brightdata_url or not supabase_url or not supabase_key:
+        database_url = os.getenv("DATABASE_URL") or ""
+        if not api_key or not brightdata_url or not database_url:
             raise RuntimeError("Missing environment variables for Stage2Service")
         self.brightdata = BrightdataClient(api_key, brightdata_url)
-        self.supabase = SupabaseClient(supabase_url, supabase_key)
+        self.database = DatabaseClient(database_url)
 
     def run_once(self):
         self.stats.update({
@@ -40,7 +39,7 @@ class Stage2Service:
             "failed": 0,
             "invalid": 0,
         })
-        snapshots = self.supabase.get_unprocessed_snapshots() or []
+        snapshots = self.database.get_unprocessed_snapshots() or []
         for s in snapshots:
             if self._stop.is_set():
                 break
@@ -57,13 +56,13 @@ class Stage2Service:
                     self.stats["skipped"] += 1
                     logger.info(f"Stage2 no data for {snapshot_id}")
                     continue
-                ok, err = self.supabase.save_response(snapshot_id, data)
+                ok, err = self.database.save_response(snapshot_id, data)
                 if ok:
-                    self.supabase.mark_as_processed(snapshot_id)
+                    self.database.mark_as_processed(snapshot_id)
                     self.stats["saved"] += 1
                     logger.info(f"Stage2 saved response for {snapshot_id}")
                 elif err == "duplicate":
-                    self.supabase.mark_as_processed(snapshot_id)
+                    self.database.mark_as_processed(snapshot_id)
                     self.stats["skipped"] += 1
                     logger.info(f"Stage2 duplicate response for {snapshot_id}")
                 else:
