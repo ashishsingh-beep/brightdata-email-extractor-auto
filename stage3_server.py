@@ -56,15 +56,21 @@ class Stage3Service:
             response_data = row.get("response")
             try:
                 emails = extract_emails_from_json(response_data) if response_data else []
+                new_emails = []
                 for email in emails:
                     ok, err = self.database.save_email(email)
                     if ok:
                         self.stats["emails_saved"] += 1
+                        new_emails.append(email)
                     elif err == "duplicate":
                         self.stats["duplicates"] += 1
                     else:
                         self.stats["failed"] += 1
                         logger.error(f"Stage3 failed saving email {email}")
+                
+                # Save stats for this snapshot
+                self.database.save_snapshot_stats(snapshot_id, new_emails)
+                
                 if self.database.mark_email_extracted(snapshot_id):
                     self.stats["rows_processed"] += 1
                 else:

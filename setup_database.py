@@ -111,6 +111,18 @@ def setup_database():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """))
+
+            # Create snapshot_stats table
+            logger.info("Creating snapshot_stats table...")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS snapshot_stats (
+                    snapshot_id TEXT PRIMARY KEY,
+                    email_count INTEGER DEFAULT 0,
+                    emails TEXT[],
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (snapshot_id) REFERENCES snapshot_table(snapshot_id)
+                );
+            """))
             
             conn.commit()
             logger.info("Database schema initialized successfully.")

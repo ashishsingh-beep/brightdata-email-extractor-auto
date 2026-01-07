@@ -7,7 +7,7 @@ This document explains each stage at a high level and goes deep on Stage 2 and S
 - Flow:
   - Load queries and strip empties
   - Remove duplicates (case-insensitive)
-  - Fetch all historical queries from `snapshot_table.query[]` in Supabase
+  - Fetch all historical queries from `snapshot_table.query[]` in Local PostgreSQL
   - Split into new vs. existing; allow download of a filtered CSV containing only new queries
 - Output: Filtered list for Stage 1 (or a CSV download)
 

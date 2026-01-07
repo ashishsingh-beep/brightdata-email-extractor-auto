@@ -449,6 +449,40 @@ class DatabaseClient:
             logger.error(f"Error fetching emails: {e}")
             return []
 
+    def save_snapshot_stats(self, snapshot_id: str, emails: List[str]) -> bool:
+        """
+        Save snapshot statistics to snapshot_stats table
+        
+        Args:
+            snapshot_id: The snapshot ID
+            emails: List of new emails found in this snapshot
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with self.engine.connect() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO snapshot_stats (snapshot_id, email_count, emails) 
+                        VALUES (:snapshot_id, :email_count, :emails)
+                        ON CONFLICT (snapshot_id) DO UPDATE 
+                        SET email_count = EXCLUDED.email_count, emails = EXCLUDED.emails
+                    """),
+                    {
+                        "snapshot_id": snapshot_id, 
+                        "email_count": len(emails), 
+                        "emails": emails
+                    }
+                )
+                conn.commit()
+            logger.info(f"Saved stats for snapshot {snapshot_id}: {len(emails)} new emails")
+            return True
+            
+        except SQLAlchemyError as e:
+            logger.error(f"Error saving snapshot stats: {e}")
+            return False
+
 
 class EmailScraperEngine:
     """Main engine for orchestrating the scraping process"""
